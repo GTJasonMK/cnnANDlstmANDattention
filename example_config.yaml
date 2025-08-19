@@ -1,0 +1,58 @@
+device: null
+model:
+  fc_hidden: 128
+  forecast_horizon: 3
+  cnn:
+    dropout: 0.1
+    use_batchnorm: true
+    layers:
+      - {out_channels: 32, kernel_size: 5, activation: relu, pool: max, pool_kernel_size: 2}
+      - {out_channels: 64, kernel_size: 3, activation: gelu, pool: max, pool_kernel_size: 2}
+  lstm:
+    hidden_size: 128
+    num_layers: 2
+    bidirectional: true
+    dropout: 0.1
+  attention:
+    enabled: true
+    num_heads: 4
+    dropout: 0.1
+    add_positional_encoding: false
+
+data:
+  data_path: data\simulated.csv
+  sequence_length: 64
+  horizon: 3
+  feature_indices: null
+  target_indices: null
+  train_split: 0.7
+  val_split: 0.15
+  normalize: standard
+  batch_size: 64
+  num_workers: 0
+  shuffle_train: true
+  drop_last: false
+
+train:
+  epochs: 20
+  loss: mse
+  optimizer:
+    name: adam
+    lr: 0.001
+    weight_decay: 0.0001
+  scheduler:
+    name: cosine
+    T_max: 20
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 0.0
+  checkpoints:
+    dir: checkpoints
+    save_best_only: true
+  gradient_clip: 1.0
+  mixed_precision: false
+  log_dir: runs
+  seed: 42
+  print_every: 50
+
