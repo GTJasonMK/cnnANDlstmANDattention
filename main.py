@@ -76,11 +76,12 @@ def setup_env(cfg):
 def build_model_with_data(cfg, input_size: int, n_targets: int):
     # Build model from cfg but override num_features and targets
     m = cfg.model
+    # 兼容：当选择 TCN 时，沿用 cnn.layers 作为 TCN 的层配置
     model = CNNLSTMAttentionModel(
         num_features=input_size,
-        cnn_layers=[vars(l) if not isinstance(l, dict) else l for l in m.cnn.layers],
-        use_batchnorm=m.cnn.use_batchnorm,
-        cnn_dropout=m.cnn.dropout,
+        cnn_layers=[vars(l) if not isinstance(l, dict) else l for l in (m.tcn.layers if getattr(m, 'tcn', None) and getattr(m.tcn, 'enabled', False) else m.cnn.layers)],
+        use_batchnorm=(m.tcn.use_batchnorm if getattr(m, 'tcn', None) and getattr(m.tcn, 'enabled', False) else m.cnn.use_batchnorm),
+        cnn_dropout=(m.tcn.dropout if getattr(m, 'tcn', None) and getattr(m.tcn, 'enabled', False) else m.cnn.dropout),
         lstm_hidden=m.lstm.hidden_size,
         lstm_layers=m.lstm.num_layers,
         bidirectional=m.lstm.bidirectional,
@@ -92,7 +93,9 @@ def build_model_with_data(cfg, input_size: int, n_targets: int):
         n_targets=n_targets,
         attn_add_pos_enc=m.attention.add_posional_encoding if hasattr(m.attention, 'add_posional_encoding') else m.attention.add_positional_encoding,
         lstm_dropout=m.lstm.dropout,
-        cnn_variant=getattr(m.cnn, 'variant', 'standard'),
+        cnn_variant=(
+            'tcn' if (getattr(m, 'tcn', None) and getattr(m.tcn, 'enabled', False)) else getattr(m.cnn, 'variant', 'standard')
+        ),
         attn_variant=getattr(m.attention, 'variant', 'standard'),
         multiscale_scales=getattr(m.attention, 'multiscale_scales', [1, 2]),
         multiscale_fuse=getattr(m.attention, 'multiscale_fuse', 'sum'),
@@ -150,7 +153,7 @@ def run(cfg, resume_path: Optional[str] = None):
         last_epoch = trainer.load_checkpoint(resume_path)
         print(f"Resumed from epoch {last_epoch}")
 
-    history = trainer.fit(train_loader, val_loader)
+    history = trainer.fit(train_loader, val_loader, test_loader)
 
     # 可视化与评估开关
     if getattr(cfg, 'visual_enabled', True):

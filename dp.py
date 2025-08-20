@@ -40,7 +40,7 @@ def remove_columns_from_csv(input_file, columns_to_remove):
     print(f"删除了以下列: {columns_to_remove_existing}")
 
 def main():
-    input_file = "./data/all_six_datasets/weather/weather.csv"
+    input_file = "E:/code/data/all_six_datasets/traffic/traffic.csv"
     columns=['date']
     # 检查输入文件是否存在
     if not os.path.isfile(input_file):

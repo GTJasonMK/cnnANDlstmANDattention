@@ -36,12 +36,14 @@ def _savefig(filename: str, save_dir: Optional[str] = None):
 def plot_losses(history: Dict[str, list], save: bool = True, filename: str = "loss_curve.png"):
     plt.figure(figsize=(8, 4))
     plt.plot(history.get("train_loss", []), label="train")
-    if "val_loss" in history:
+    if "val_loss" in history and len(history.get("val_loss", [])) > 0:
         plt.plot(history["val_loss"], label="val")
+    if "test_loss" in history and len(history.get("test_loss", [])) > 0:
+        plt.plot(history["test_loss"], label="test")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
-    plt.title("Training/Validation Loss")
+    plt.title("Training/Validation/Test Loss")
     plt.tight_layout()
     if save:
         _savefig(filename)
@@ -115,21 +117,24 @@ def plot_feature_importance(weights: np.ndarray, feature_names: Optional[list] =
 # ----------------------------
 
 def plot_losses_logscale(history: Dict[str, list], save: bool = True, filename: str = "loss_curve_log.png"):
-    """绘制训练/验证损失的对数尺度曲线。
+    """绘制训练/验证/测试损失的对数尺度曲线。
     Args:
-        history: 包含 'train_loss' 和可选 'val_loss' 的字典
+        history: 包含 'train_loss'、可选 'val_loss'、可选 'test_loss' 的字典
         save: 是否保存图像
         filename: 保存文件名
     """
     plt.figure(figsize=(8, 4))
     train = history.get("train_loss", [])
     val = history.get("val_loss", [])
+    test = history.get("test_loss", [])
     if len(train) > 0:
         plt.semilogy(train, label="train")
     if len(val) > 0:
         plt.semilogy(val, label="val")
+    if len(test) > 0:
+        plt.semilogy(test, label="test")
     plt.xlabel("Epoch"); plt.ylabel("Loss (log scale)")
-    plt.legend(); plt.title("Training/Validation Loss (log)")
+    plt.legend(); plt.title("Training/Validation/Test Loss (log)")
     plt.tight_layout()
     if save: _savefig(filename)
 

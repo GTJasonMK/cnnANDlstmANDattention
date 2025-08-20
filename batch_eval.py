@@ -21,12 +21,25 @@ from __future__ import annotations
 import argparse
 import os
 import json
+import traceback
 from typing import Optional, List, Dict, Any
 
 import numpy as np
 
 # 复用单模型评估逻辑
-from standalone_eval import evaluate, parse_indices
+from standalone_eval import evaluate, parse_indices, _extract_arch_meta
+
+# 强制严格模式：要求 checkpoint 中 cfg 完整准确
+os.environ.setdefault("EVAL_STRICT", "1")
+
+
+def _dbg_enabled() -> bool:
+    return os.environ.get("EVAL_DEBUG", "0") != "0"
+
+
+def _dlog(msg: str):
+    if _dbg_enabled():
+        print(f"[DEBUG] {msg}")
 
 
 def _ensure_dir(d: str):
@@ -135,8 +148,14 @@ def main():
     # 批量控制
     p.add_argument('--per_model_plots', action='store_true', help='是否为每个模型生成其单独的图像输出')
     p.add_argument('--save_summary_plot', action='store_true', help='是否生成汇总对比图（MSE）')
+    p.add_argument('--debug', action='store_true', help='开启详细调试日志（等价于设置环境变量 EVAL_DEBUG=1）')
 
     args = p.parse_args()
+
+    # 打开调试日志
+    if args.debug:
+        os.environ["EVAL_DEBUG"] = "1"
+        _dlog("Debug mode enabled by --debug")
 
     # 解析 indices
     feat_idx = parse_indices(args.feature_indices)
@@ -156,17 +175,30 @@ def main():
         print(f"[{i}/{len(ckpts)}] 评估: {name}")
         out_dir_i = os.path.join(args.output_dir, name)
         try:
+            # 从 ckpt 获取训练期的 cfg，默认对齐训练时的 feature/target 索引、horizon、normalize、seq_len
+            import torch
+            c = torch.load(ckpt, map_location='cpu')
+            cfg_i = c.get('cfg', {}) if isinstance(c, dict) else {}
+            data_i = (cfg_i.get('data') or {}) if isinstance(cfg_i, dict) else {}
+            model_i = (cfg_i.get('model') or {}) if isinstance(cfg_i, dict) else {}
+
+            feat_idx_i = feat_idx if feat_idx is not None else data_i.get('feature_indices')
+            targ_idx_i = targ_idx if targ_idx is not None else data_i.get('target_indices')
+            seq_len_i = args.sequence_length if args.sequence_length is not None else data_i.get('sequence_length')
+            horizon_i = args.horizon if args.horizon is not None else (model_i.get('forecast_horizon', data_i.get('horizon')))
+            normalize_i = args.normalize if args.normalize is not None else data_i.get('normalize')
+
             metrics = evaluate(
                 checkpoint=ckpt,
                 data_path=args.data,
                 output_dir=out_dir_i,
                 device=args.device,
                 batch_size=args.batch_size,
-                sequence_length=args.sequence_length,
-                horizon=args.horizon,
-                normalize=args.normalize,
-                feature_indices=feat_idx,
-                target_indices=targ_idx,
+                sequence_length=seq_len_i,
+                horizon=horizon_i,
+                normalize=normalize_i,
+                feature_indices=feat_idx_i,
+                target_indices=targ_idx_i,
                 save_csv=False,            # 批量模式默认不逐模型保存 CSV，可视化也默认关闭
                 plot_sequences=False,
                 feature_names=None,
@@ -174,15 +206,28 @@ def main():
             status = 'ok'
         except Exception as e:
             print(f"[ERROR] 评估失败: {name} -> {e}")
+            if _dbg_enabled():
+                print("[TRACE]" )
+                print(traceback.format_exc())
             metrics = None
             status = f"error: {e}"
 
         params = _param_count_from_ckpt(ckpt)
+        # 提取架构信息（若可）
+        arch = {}
+        try:
+            arch = _extract_arch_meta(cfg_i if isinstance(cfg_i, dict) else {})
+        except Exception:
+            arch = {}
+
         row: Dict[str, Any] = {
             'model': name,
             'checkpoint': ckpt,
             'status': status,
             'params': params,
+            'cnn_variant': arch.get('cnn_variant'),
+            'rnn_type': arch.get('rnn_type'),
+            'attn_variant': arch.get('attn_variant'),
         }
         if isinstance(metrics, dict):
             row.update(metrics)

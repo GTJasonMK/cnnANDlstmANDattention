@@ -71,13 +71,16 @@ class DilatedConvBlock(nn.Module):
 
         # 仅当输入与输出通道一致时启用残差，避免形状不匹配
         self.use_residual = use_residual and (in_channels == out_channels)
-        self.dilation_rates = dilation_rates
+        # 容错：dilation_rates 可能为 None 或空
+        if not dilation_rates:
+            dilation_rates = [1, 2, 4]
+        self.dilation_rates = [int(d) for d in dilation_rates]
         self.out_channels = out_channels
 
         # 多分支膨胀卷积
         self.dilated_convs = nn.ModuleList()
-        branch_channels = max(1, out_channels // max(1, len(dilation_rates)))
-        for dilation in dilation_rates:
+        branch_channels = max(1, out_channels // max(1, len(self.dilation_rates)))
+        for dilation in self.dilation_rates:
             padding = ((kernel_size - 1) // 2) * dilation
             conv = nn.Conv1d(
                 in_channels, branch_channels,
@@ -173,7 +176,18 @@ class AdvancedCNNFeatureExtractor(nn.Module):
                 )
             elif self.architecture_type == "dilated":
                 # Use dilated convolutions
-                dilation_rates = cfg.get("dilation_rates", [1, 2, 4])
+                # 注意：当配置中显式给出 null 时，dict.get 会返回 None 而不是默认值
+                raw_rates = cfg.get("dilation_rates", None)
+                if raw_rates is None:
+                    dilation_rates = [1, 2, 4]
+                else:
+                    # 允许给单个整数或列表，统一转为整数列表
+                    if isinstance(raw_rates, (list, tuple)):
+                        dilation_rates = [int(x) for x in raw_rates if x is not None]
+                    else:
+                        dilation_rates = [int(raw_rates)]
+                    if len(dilation_rates) == 0:
+                        dilation_rates = [1, 2, 4]
                 conv_block = self._build_dilated_block(
                     current_c, out_c, k, dilation_rates, activation, cfg
                 )

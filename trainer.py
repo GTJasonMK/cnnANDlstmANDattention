@@ -5,6 +5,8 @@ import os
 from dataclasses import asdict
 from typing import Dict, Tuple, Optional
 
+from config import canonicalize_for_checkpoint, validate_full_config_strict
+
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -85,8 +87,8 @@ class Trainer:
         self.work_dir = work_dir
         self.device = _get_device(cfg)
         self.model.to(self.device)
-        self.amp = torch.cuda.is_available() and cfg.train.mixed_precision
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp)
+        self.amp = (self.device.type == 'cuda') and cfg.train.mixed_precision
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp)
         self.criterion = _build_loss(cfg.train.loss)
         self.optimizer = _build_optimizer(self.model.parameters(), cfg.train.optimizer)
         self.scheduler = _build_scheduler(self.optimizer, cfg.train.scheduler)
@@ -116,12 +118,8 @@ class Trainer:
         x, y = batch
         x = x.to(self.device)
         y = y.to(self.device)
-        # use new autocast API if available
-        try:
-            from torch import amp as _amp  # type: ignore
-            autocast_ctx = _amp.autocast(device_type='cuda', enabled=self.amp)
-        except Exception:
-            autocast_ctx = torch.cuda.amp.autocast(enabled=self.amp)
+        # use torch.amp autocast (cuda)
+        autocast_ctx = torch.amp.autocast('cuda', enabled=self.amp)
         with autocast_ctx:
             preds = self.model(x)
             loss = self.criterion(preds, y)
@@ -135,8 +133,8 @@ class Trainer:
             self.scaler.update()
         return preds.detach(), float(loss.detach().item())
 
-    def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None):
-        history = {"train_loss": [], "val_loss": [], "lr": []}
+    def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None, test_loader: Optional[DataLoader] = None):
+        history = {"train_loss": [], "val_loss": [], "test_loss": [], "lr": []}
         for epoch in range(1, self.cfg.train.epochs + 1):
             self.model.train()
             running = 0.0
@@ -159,6 +157,17 @@ class Trainer:
                 val_loss = v_running / max(1, len(val_loader))
                 history["val_loss"].append(val_loss)
 
+            test_loss = None
+            if test_loader is not None:
+                self.model.eval()
+                t_running = 0.0
+                with torch.no_grad():
+                    for batch in test_loader:
+                        _, t_loss = self._step(batch, train=False)
+                        t_running += t_loss
+                test_loss = t_running / max(1, len(test_loader))
+                history["test_loss"].append(test_loss)
+
             # scheduler
             if self.scheduler is not None:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -167,6 +176,14 @@ class Trainer:
                     self.scheduler.step()
             # record lr
             history["lr"].append(self.optimizer.param_groups[0]["lr"])
+
+            # epoch summary print
+            msg = f"Epoch {epoch}: train_loss={avg_train:.6f}"
+            if val_loader is not None and val_loss is not None:
+                msg += f", val_loss={val_loss:.6f}"
+            if test_loader is not None and test_loss is not None:
+                msg += f", test_loss={test_loss:.6f}"
+            print(msg)
 
             # tensorboard logging
             if self.tb is not None:
@@ -179,11 +196,14 @@ class Trainer:
             is_best = val_loss is not None and val_loss < self.best_val
             if is_best:
                 self.best_val = val_loss  # type: ignore
+            # 规范化+严格校验，确保保存的 cfg 可被严格评估端精确重建
+            cfg_to_save = canonicalize_for_checkpoint(self.cfg)
+            validate_full_config_strict(cfg_to_save)
             ckpt = {
                 "epoch": epoch,
                 "model_state": self.model.state_dict(),
                 "optimizer_state": self.optimizer.state_dict(),
-                "cfg": asdict(self.cfg),
+                "cfg": asdict(cfg_to_save),
                 "best_val": self.best_val,
             }
             # 按配置保存按-epoch 的快照
@@ -194,6 +214,17 @@ class Trainer:
             if is_best:
                 best_path = os.path.join(self.cfg.train.checkpoints.dir, "model_best.pt")
                 torch.save(ckpt, best_path)
+                # 可选：将最佳模型另外导出到指定目录并按架构首字母命名（例如 sgs.pt）
+                export_dir = getattr(self.cfg.train.checkpoints, 'export_best_dir', None)
+                if export_dir:
+                    os.makedirs(export_dir, exist_ok=True)
+                    m = self.cfg.model
+                    cnn_var = str(getattr(m.cnn, 'variant', 'standard')).strip().lower()[:1]
+                    rnn_type = str(getattr(m.lstm, 'rnn_type', 'lstm')).strip().lower()[:1]
+                    attn_var = str(getattr(m.attention, 'variant', 'standard')).strip().lower()[:1]
+                    export_name = f"{cnn_var}{rnn_type}{attn_var}.pt"
+                    export_path = os.path.join(export_dir, export_name)
+                    torch.save(ckpt, export_path)
 
             # early stopping
             if self.early_stopper is not None and val_loss is not None:
@@ -203,11 +234,14 @@ class Trainer:
         if self.tb is not None:
             self.tb.flush()
         # 始终在训练结束时保存最终模型
+        # 结束时也保存规范化后的 cfg
+        cfg_to_save = canonicalize_for_checkpoint(self.cfg)
+        validate_full_config_strict(cfg_to_save)
         final_ckpt = {
             "epoch": epoch,
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
-            "cfg": asdict(self.cfg),
+            "cfg": asdict(cfg_to_save),
             "best_val": self.best_val,
         }
         last_path = os.path.join(self.cfg.train.checkpoints.dir, "model_last.pt")

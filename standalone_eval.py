@@ -30,14 +30,38 @@ Usage:
 import argparse
 import json
 import os
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
 import torch
 import torch.nn as nn
+import traceback
 
 # Only import core model
 from model_architecture import CNNLSTMAttentionModel
+
+
+# -----------------------------
+# Debug helpers
+# -----------------------------
+
+def _dbg_enabled() -> bool:
+    import os as _os
+    return (_os.environ.get("EVAL_DEBUG", "0") != "0")
+
+
+def _dlog(msg: str):
+    if _dbg_enabled():
+        print(f"[DEBUG] {msg}")
+
+
+def _strict_mode() -> bool:
+    import os as _os
+    return (_os.environ.get("EVAL_STRICT", "1") != "0")
+
+def _env_true(name: str, default: str = "0") -> bool:
+    import os as _os
+    return _os.environ.get(name, default) not in (None, "0", "false", "False", "")
 
 
 # -----------------------------
@@ -159,6 +183,47 @@ def regression_metrics(preds: torch.Tensor | np.ndarray, targets: torch.Tensor |
     r2 = float(1.0 - ss_res / ss_tot)
     return {"mse": mse, "mae": mae, "rmse": rmse, "mape": mape, "r2": r2}
 
+
+
+# -----------------------------
+# Robust casting helpers
+# -----------------------------
+
+def _as_int(val, default: int) -> int:
+    try:
+        return int(val) if val is not None else int(default)
+    except Exception:
+        return int(default)
+
+
+def _as_float(val, default: float) -> float:
+    try:
+        return float(val) if val is not None else float(default)
+    except Exception:
+        return float(default)
+
+
+def _as_bool(val, default: bool) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return bool(default)
+
+
+def _to_int_list(val) -> Optional[List[int]]:
+    """将任意列表/元组转换为 int 列表；过滤 None/非法项；若无有效项返回 None。"""
+    if isinstance(val, (list, tuple)):
+        out: List[int] = []
+        for x in val:
+            try:
+                if x is None:
+                    continue
+                out.append(int(x))
+            except Exception:
+                continue
+        return out if len(out) > 0 else None
+    return None
 
 # -----------------------------
 # Visualization (minimal, self-contained)
@@ -315,31 +380,189 @@ def plot_feature_sequences(
 # Checkpoint & Model construction
 # -----------------------------
 
-def build_model_from_cfg(cfg_dict: Dict, input_size: int, n_targets: int) -> CNNLSTMAttentionModel:
-    """Map stored cfg (asdict(FullConfig)) to model constructor args."""
-    m = cfg_dict.get("model", {})
-    cnn = m.get("cnn", {})
-    lstm = m.get("lstm", {})
-    attn = m.get("attention", {})
-    cnn_layers = cnn.get("layers", [])
-    # layers may be list of dicts already
+def _extract_arch_meta(cfg_dict: Dict) -> Dict[str, Any]:
+    m = cfg_dict.get("model", {}) or {}
+    cnn = m.get("cnn", {}) or {}
+    tcn = m.get("tcn", {}) or {}
+    lstm = m.get("lstm", {}) or {}
+    attn = m.get("attention", {}) or {}
+
+    # 判断是否启用 TCN：显式 variant=tcn 或 tcn.enabled=True
+    cnn_variant = ((cnn.get("variant") or "standard")).lower()
+    tcn_enabled = _as_bool(tcn.get("enabled"), False)
+    if tcn_enabled:
+        cnn_variant = "tcn"
+
+    attn_variant = ((attn.get("variant") or "standard")).lower()
+    rnn_type = (str(lstm.get("rnn_type", "lstm")).lower() if lstm.get("rnn_type") is not None else "lstm")
+
+    return {
+        "cnn_variant": cnn_variant,
+        "tcn_enabled": bool(tcn_enabled),
+        "attn_variant": attn_variant,
+        "attn_enabled": _as_bool(attn.get("enabled"), False),
+        "rnn_type": rnn_type,
+        "multiscale_scales": attn.get("multiscale_scales", [1, 2]),
+        "multiscale_fuse": attn.get("multiscale_fuse", "sum"),
+        "fc_hidden": _as_int(m.get("fc_hidden"), 128),
+        "forecast_horizon": _as_int(m.get("forecast_horizon"), 1),
+    }
+
+
+def _strict_get(d: Dict[str, Any], key: str, typename: str) -> Any:
+    if key not in d:
+        raise ValueError(f"缺少必需字段: {key}")
+    val = d[key]
+    if val is None:
+        raise ValueError(f"字段 {key} 不能为 None（需与训练时一致）")
+    return val
+
+
+def _strict_int(d: Dict[str, Any], key: str) -> int:
+    val = _strict_get(d, key, "int")
+    try:
+        return int(val)
+    except Exception:
+        raise ValueError(f"字段 {key} 需要为整数，但得到: {val}")
+
+
+def _strict_bool(d: Dict[str, Any], key: str) -> bool:
+    val = _strict_get(d, key, "bool")
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    raise ValueError(f"字段 {key} 需要为布尔，但得到: {val}")
+
+
+def _strict_list(d: Dict[str, Any], key: str) -> List[Any]:
+    val = _strict_get(d, key, "list")
+    if not isinstance(val, list):
+        raise ValueError(f"字段 {key} 需要为列表，但得到: {type(val)}")
+    return val
+
+
+def _validate_layers_strict(layers: List[Dict[str, Any]], required_keys: List[str], path: str):
+    if not layers:
+        raise ValueError(f"{path} 至少需要一层配置")
+    for i, l in enumerate(layers):
+        if not isinstance(l, dict):
+            raise ValueError(f"{path}[{i}] 需要为字典，但得到: {type(l)}")
+        for k in required_keys:
+            if l.get(k, None) is None:
+                raise ValueError(f"{path}[{i}] 缺少必需字段: {k}")
+
+
+def build_model_from_cfg_strict(cfg_dict: Dict, input_size: int, n_targets: int) -> CNNLSTMAttentionModel:
+    """严格从 checkpoint 的 cfg 重建训练时完全一致的模型结构。
+    - 不使用默认值，不做降级；字段缺失/None 直接抛错
+    - CNN 变体：standard/depthwise/dilated
+    - TCN：variant=tcn 或 tcn.enabled=True 时使用 tcn 配置
+    - RNN：lstm/gru
+    - 注意力：standard/multiscale（multiscale 需提供 scales/fuse）
+    """
+    if not isinstance(cfg_dict, dict):
+        raise ValueError("checkpoint 中 cfg 不是字典或为空，请保存完整配置后再评估")
+
+    m = _strict_get(cfg_dict, "model", "dict")
+    if not isinstance(m, dict):
+        raise ValueError("cfg['model'] 必须为字典")
+
+    # 基本结构字段
+    fc_hidden = _strict_int(m, "fc_hidden")
+    forecast_horizon = _strict_int(m, "forecast_horizon")
+
+    # 子模块配置
+    cnn = _strict_get(m, "cnn", "dict")
+    if not isinstance(cnn, dict):
+        raise ValueError("cfg['model']['cnn'] 必须为字典")
+    lstm = _strict_get(m, "lstm", "dict")
+    if not isinstance(lstm, dict):
+        raise ValueError("cfg['model']['lstm'] 必须为字典")
+    attn = _strict_get(m, "attention", "dict")
+    if not isinstance(attn, dict):
+        raise ValueError("cfg['model']['attention'] 必须为字典")
+
+    cnn_variant = _strict_get(cnn, "variant", "str").lower()
+
+    # TCN 分支或 CNN 分支
+    base_layers: List[Dict[str, Any]]
+    use_batchnorm: bool
+    dropout: float
+
+    if cnn_variant == "tcn":
+        tcn = _strict_get(m, "tcn", "dict")
+        if not isinstance(tcn, dict):
+            raise ValueError("cfg['model']['tcn'] 必须为字典，且需包含 TCN 层配置")
+        layers = _strict_list(tcn, "layers")
+        _validate_layers_strict(layers, ["out_channels", "kernel_size", "dilation", "activation"], "cfg.model.tcn.layers")
+        base_layers = layers
+        use_batchnorm = _strict_bool(tcn, "use_batchnorm")
+        dropout = float(_strict_get(tcn, "dropout", "float"))
+    else:
+        # CNN 变体
+        layers = _strict_list(cnn, "layers")
+        req = ["out_channels", "kernel_size"]
+        if cnn_variant == "dilated":
+            # 要求每层明确提供 dilation_rates
+            req.append("dilation_rates")
+        _validate_layers_strict(layers, req, "cfg.model.cnn.layers")
+        base_layers = layers
+        use_batchnorm = _strict_bool(cnn, "use_batchnorm")
+        dropout = float(_strict_get(cnn, "dropout", "float"))
+
+    # RNN
+    rnn_type = _strict_get(lstm, "rnn_type", "str").lower()
+    lstm_hidden = _strict_int(lstm, "hidden_size")
+    lstm_layers = _strict_int(lstm, "num_layers")
+    bidirectional = _strict_bool(lstm, "bidirectional")
+    lstm_dropout = float(_strict_get(lstm, "dropout", "float"))
+
+    # Attention
+    attn_enabled = _strict_bool(attn, "enabled")
+    attn_variant = _strict_get(attn, "variant", "str").lower()
+    attn_heads = _strict_int(attn, "num_heads")
+    attn_dropout = float(_strict_get(attn, "dropout", "float"))
+    # 位置编码字段名兼容两种拼写，但必须提供其中之一
+    if "add_positional_encoding" in attn:
+        attn_add_pos_enc = _strict_bool(attn, "add_positional_encoding")
+    elif "add_posional_encoding" in attn:
+        attn_add_pos_enc = _strict_bool(attn, "add_posional_encoding")
+    else:
+        raise ValueError("attention 缺少 add_positional_encoding 字段（或旧拼写 add_posional_encoding）")
+
+    multiscale_scales = None
+    multiscale_fuse = None
+    if attn_variant == "multiscale":
+        multiscale_scales = _strict_list(attn, "multiscale_scales")
+        if not all(isinstance(x, int) for x in multiscale_scales):
+            raise ValueError("multiscale_scales 需要为整数列表")
+        multiscale_fuse = _strict_get(attn, "multiscale_fuse", "str")
+
+    # 构建模型（严格模式：完全按 cfg）。若 TCN 配置写在 cnn.layers（老格式）且 cnn_variant==tcn，会在前面严格校验环节已抛错。
     model = CNNLSTMAttentionModel(
-        num_features=input_size,
-        cnn_layers=[(l if isinstance(l, dict) else dict(l)) for l in cnn_layers],
-        use_batchnorm=bool(cnn.get("use_batchnorm", True)),
-        cnn_dropout=float(cnn.get("dropout", 0.0)),
-        lstm_hidden=int(lstm.get("hidden_size", 128)),
-        lstm_layers=int(lstm.get("num_layers", 2)),
-        bidirectional=bool(lstm.get("bidirectional", True)),
-        attn_enabled=bool(attn.get("enabled", False)),
-        attn_heads=int(attn.get("num_heads", 4)),
-        attn_dropout=float(attn.get("dropout", 0.1)),
-        fc_hidden=int(m.get("fc_hidden", 128)),
-        forecast_horizon=int(m.get("forecast_horizon", 1)),
+        num_features=int(input_size),
+        cnn_layers=[(l if isinstance(l, dict) else dict(l)) for l in base_layers],
+        use_batchnorm=use_batchnorm,
+        cnn_dropout=float(dropout),
+        lstm_hidden=lstm_hidden,
+        lstm_layers=lstm_layers,
+        bidirectional=bidirectional,
+        attn_enabled=attn_enabled,
+        attn_heads=attn_heads,
+        attn_dropout=attn_dropout,
+        fc_hidden=fc_hidden,
+        forecast_horizon=forecast_horizon,
         n_targets=int(n_targets),
-        attn_add_pos_enc=bool(attn.get("add_positional_encoding", False)),
-        lstm_dropout=float(lstm.get("dropout", 0.0)),
+        attn_add_pos_enc=attn_add_pos_enc,
+        lstm_dropout=lstm_dropout,
+        cnn_variant=cnn_variant,
+        attn_variant=attn_variant,
+        multiscale_scales=multiscale_scales if multiscale_scales is not None else [1],
+        multiscale_fuse=multiscale_fuse if multiscale_fuse is not None else "sum",
     )
+    # 设置 RNN 类型
+    model.rnn_type = rnn_type
     return model
 
 
@@ -364,63 +587,202 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     ckpt = torch.load(checkpoint, map_location="cpu")
     cfg_dict = ckpt.get("cfg", {})
+    if not isinstance(cfg_dict, dict):
+        cfg_dict = {}
+    _dlog(f"Loaded ckpt keys={list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}")
+    _dlog(f"cfg_dict_type={type(cfg_dict)} model_keys={list((cfg_dict.get('model') or {}).keys()) if isinstance(cfg_dict, dict) else 'N/A'} data_keys={list((cfg_dict.get('data') or {}).keys()) if isinstance(cfg_dict, dict) else 'N/A'}")
 
     # Load data
     arr = load_array_from_path(data_path)
 
     # Infer preprocessing params from checkpoint cfg with CLI override
     data_cfg = cfg_dict.get("data", {}) if isinstance(cfg_dict, dict) else {}
-    seq_len = int(sequence_length if sequence_length is not None else data_cfg.get("sequence_length", 64))
-    hz = int(horizon if horizon is not None else cfg_dict.get("model", {}).get("forecast_horizon", data_cfg.get("horizon", 1)))
+    if not isinstance(data_cfg, dict):
+        data_cfg = {}
+    seq_len = _as_int(sequence_length, _as_int(data_cfg.get("sequence_length"), 64))
+    model_cfg = cfg_dict.get("model", {}) if isinstance(cfg_dict, dict) else {}
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    hz = _as_int(horizon, _as_int(model_cfg.get("forecast_horizon"), _as_int(data_cfg.get("horizon"), 1)))
     norm = (normalize if normalize is not None else data_cfg.get("normalize", "standard"))
+    _dlog(f"seq_len={seq_len} horizon={hz} normalize={norm}")
 
     feat_idx = feature_indices
     if feat_idx is None:
         fi = data_cfg.get("feature_indices", None)
-        feat_idx = list(map(int, fi)) if isinstance(fi, list) else None
+        feat_idx = _to_int_list(fi)
     targ_idx = target_indices
     if targ_idx is None:
         ti = data_cfg.get("target_indices", None)
-        if isinstance(ti, list):
-            targ_idx = list(map(int, ti))
-        else:
+        targ_idx = _to_int_list(ti)
+        if targ_idx is None:
             # Align with training default: when target_indices is None, use ALL features as targets
             targ_idx = list(range(arr.shape[1]))
 
     # Fit stats on test data (note: may differ from training-time stats)
+    _dlog(f"data_shape={arr.shape} first_row_sample={arr[0][:5] if arr.size>0 else 'EMPTY'}")
     stats = fit_stats(arr, norm)
     arr_norm = apply_normalize(arr, stats, norm)
 
     # Windowize
+    _dlog(f"feature_idx={feat_idx} target_idx={targ_idx}")
     X_np, Y_np = windowize(arr_norm, seq_len, hz,
                            feat_idx if feat_idx is not None else list(range(arr.shape[1])),
                            targ_idx if targ_idx is not None else [arr.shape[1]-1])
+    _dlog(f"windowized X={X_np.shape} Y={Y_np.shape}")
 
-    # Build model
-    input_size = X_np.shape[2]
-    n_targets = 1 if Y_np.ndim == 2 else Y_np.shape[2]
-    model = build_model_from_cfg(cfg_dict, input_size=input_size, n_targets=n_targets)
+    # 读取期望的 IO 形状（从权重中推断），与数据/配置进行严格对齐
+    state = ckpt.get("model_state", {})
+    exp_in_channels = None
+    exp_out_dim = None
+    if isinstance(state, dict):
+        # 推断输入通道：寻找第一个 conv1d 权重（形状为 [out_c, in_c, k]）
+        for k, v in state.items():
+            try:
+                if isinstance(v, torch.Tensor) and v.ndim == 3 and k.startswith("cnn") and k.endswith(".weight"):
+                    exp_in_channels = int(v.shape[1])
+                    break
+            except Exception:
+                continue
+        # 推断输出维度：寻找 head.*.weight 的二维矩阵，取“最后一层 head 的 out_features”
+        head_out_dim = None
+        head_max_idx = -1
+        for k, v in state.items():
+            try:
+                if isinstance(v, torch.Tensor) and v.ndim == 2 and k.startswith("head") and k.endswith(".weight"):
+                    # 解析 head.<idx>.weight 的 idx，选择最大的 idx 作为最终输出层
+                    parts = k.split('.')
+                    idx = -1
+                    if len(parts) >= 3 and parts[0] == 'head':
+                        try:
+                            idx = int(parts[1])
+                        except Exception:
+                            idx = -1
+                    if idx >= head_max_idx:
+                        head_max_idx = idx
+                        head_out_dim = int(v.shape[0])
+            except Exception:
+                continue
+        exp_out_dim = head_out_dim
+
+    # 构建模型（严格一致）。若 cfg 信息缺失，将抛错并停止评估。
+    input_size = int(X_np.shape[2])
+    n_targets = int(1 if Y_np.ndim == 2 else Y_np.shape[2])
+    _dlog(f"input_size={input_size} n_targets={n_targets} exp_in={exp_in_channels} exp_out={exp_out_dim}")
+
+    # 严格校验：数据特征数与训练时一致；输出维度与 horizon*n_targets 一致
+    if _strict_mode():
+        if exp_in_channels is not None and input_size != exp_in_channels:
+            raise RuntimeError(
+                f"输入特征数与训练时不一致: now={input_size}, expected={exp_in_channels}. "
+                f"请使用与训练相同的特征列（或设置相同的 feature_indices），并确保数据预处理一致。")
+        hz_check = _as_int(horizon, None) or _as_int(cfg_dict.get("model", {}).get("forecast_horizon"), None)
+        if exp_out_dim is not None and hz_check is not None:
+            expected_targets = exp_out_dim // int(hz_check) if exp_out_dim % int(hz_check) == 0 else None
+            cur_out_dim = int(n_targets) * int(hz_check)
+            if expected_targets is None or cur_out_dim != exp_out_dim:
+                # 可选1：仅对齐目标列个数（在 horizon 与 exp_out_dim 可整除时）
+                if _env_true("EVAL_AUTO_ALIGN_TARGETS") and expected_targets is not None and target_indices is None:
+                    _dlog(f"auto-align targets: take first {expected_targets} of {arr.shape[1]} columns")
+                    targ_idx = list(range(int(expected_targets)))
+                    X_np, Y_np = windowize(
+                        arr_norm, seq_len, hz_check,
+                        feat_idx if feat_idx is not None else list(range(arr.shape[1])),
+                        targ_idx
+                    )
+                    n_targets = int(1 if Y_np.ndim == 2 else Y_np.shape[2])
+                    cur_out_dim = int(n_targets) * int(hz_check)
+                    if cur_out_dim != exp_out_dim:
+                        raise RuntimeError(
+                            f"自动对齐失败: 重新计算后 hz*targets={cur_out_dim}, 仍不等于 {exp_out_dim}. "
+                            f"请显式提供训练时的 target_indices（长度={expected_targets}）。")
+                    else:
+                        _dlog("auto-align OK, proceeding with strict load")
+                # 可选2：自动推断 horizon 与目标列个数（当 horizon 与 exp_out_dim 不整除时）
+                elif _env_true("EVAL_AUTO_INFER_HZ") and target_indices is None and exp_out_dim is not None:
+                    def _divisors(n: int):
+                        ds = []
+                        for d in range(1, n + 1):
+                            if n % d == 0:
+                                ds.append(d)
+                        return ds
+                    cand_hz = _divisors(int(exp_out_dim))
+                    # 优先使用 CLI 的 horizon 或 cfg 的 horizon（若可用且可整除并满足目标列数不超过现有列数）
+                    pref = []
+                    cli_hz = _as_int(horizon, None)
+                    cfg_hz = _as_int(cfg_dict.get("model", {}).get("forecast_horizon"), None)
+                    if cli_hz in cand_hz and (exp_out_dim // int(cli_hz)) <= arr.shape[1]:
+                        pref.append(int(cli_hz))
+                    if cfg_hz in cand_hz and (exp_out_dim // int(cfg_hz)) <= arr.shape[1]:
+                        pref.append(int(cfg_hz))
+                    chosen_hz = None
+                    if pref:
+                        chosen_hz = pref[0]
+                    else:
+                        # 选择一个使 n_targets <= 当前特征列数的 horizon，偏好更大的 horizon（更接近训练可能的设定）
+                        for hz_c in sorted(cand_hz, reverse=True):
+                            n_t = exp_out_dim // hz_c
+                            if n_t <= arr.shape[1]:
+                                chosen_hz = hz_c
+                                break
+                    if chosen_hz is None:
+                        raise RuntimeError(
+                            f"无法自动推断 horizon：exp_out_dim={exp_out_dim} 与可用列数={arr.shape[1]} 不匹配。"
+                            f"请显式提供与训练一致的 horizon 与 target_indices。")
+                    expected_targets2 = exp_out_dim // int(chosen_hz)
+                    _dlog(f"auto-infer horizon: choose hz={chosen_hz}, targets={expected_targets2}")
+                    targ_idx = list(range(int(expected_targets2)))
+                    # 覆盖运行时 horizon 与 cfg 的 forecast_horizon（仅当前评估进程内生效）
+                    hz_check = int(chosen_hz)
+                    if isinstance(cfg_dict.get("model"), dict):
+                        cfg_dict["model"]["forecast_horizon"] = int(chosen_hz)
+                    X_np, Y_np = windowize(
+                        arr_norm, seq_len, hz_check,
+                        feat_idx if feat_idx is not None else list(range(arr.shape[1])),
+                        targ_idx
+                    )
+                    n_targets = int(1 if Y_np.ndim == 2 else Y_np.shape[2])
+                    cur_out_dim = int(n_targets) * int(hz_check)
+                    if cur_out_dim != exp_out_dim:
+                        raise RuntimeError(
+                            f"自动推断失败: 重新计算后 hz*targets={cur_out_dim}, 仍不等于 {exp_out_dim}. "
+                            f"请显式提供训练时的 horizon 与 target_indices。")
+                    else:
+                        _dlog("auto-infer horizon OK, proceeding with strict load")
+                else:
+                    raise RuntimeError(
+                        f"输出维度不一致: now(hz*targets)={cur_out_dim}, expected={exp_out_dim}. "
+                        f"请确保 forecast_horizon 与目标列数与训练一致。")
+
+    model = build_model_from_cfg_strict(cfg_dict, input_size=input_size, n_targets=n_targets)
 
     # Load weights
     try:
-        missing = model.load_state_dict(ckpt["model_state"], strict=False)
-        if hasattr(missing, 'missing_keys') and missing.missing_keys:
-            print(f"[WARN] Missing keys when loading state_dict: {missing.missing_keys}")
-        if hasattr(missing, 'unexpected_keys') and missing.unexpected_keys:
-            print(f"[WARN] Unexpected keys when loading state_dict: {missing.unexpected_keys}")
+        # 严格模式：必须完全匹配
+        missing = model.load_state_dict(ckpt["model_state"], strict=True)
     except RuntimeError as e:
-        # Common mismatch: output head size differs due to horizon/targets. Try to load partial weights
-        print(f"[WARN] Strict load failed due to shape mismatch: {e}\nAttempting partial load (excluding head)...")
-        # Filter out head.* parameters
-        state = ckpt["model_state"].copy()
-        to_del = [k for k in list(state.keys()) if k.startswith("head.")]
-        for k in to_del:
-            del state[k]
-        missing = model.load_state_dict(state, strict=False)
-        if hasattr(missing, 'missing_keys') and missing.missing_keys:
-            print(f"[WARN] Missing keys after partial load: {missing.missing_keys}")
-        if hasattr(missing, 'unexpected_keys') and missing.unexpected_keys:
-            print(f"[WARN] Unexpected keys after partial load: {missing.unexpected_keys}")
+        if _strict_mode():
+            raise RuntimeError(
+                "严格加载权重失败（形状不匹配）。请确保评估时的数据特征数、目标列与 forecast_horizon 与训练完全一致。\n"
+                f"详细信息: {e}")
+        else:
+            _dlog("state_dict strict load failed; attempting partial load")
+            print(f"[WARN] Strict load failed due to shape mismatch: {e}\nAttempting partial load (excluding head)...")
+            state2 = ckpt["model_state"].copy()
+            to_del = [k for k in list(state2.keys()) if k.startswith("head.")]
+            for k in to_del:
+                del state2[k]
+            try:
+                missing = model.load_state_dict(state2, strict=False)
+            except RuntimeError:
+                _dlog("partial load still failed; fallback to shape-matched loading")
+                cur = model.state_dict()
+                filtered = {}
+                for k, v in ckpt["model_state"].items():
+                    if k in cur and hasattr(v, 'shape') and hasattr(cur[k], 'shape') and tuple(v.shape) == tuple(cur[k].shape):
+                        filtered[k] = v
+                _dlog(f"shape-matched params: {len(filtered)}/{len(ckpt['model_state'])}")
+                missing = model.load_state_dict(filtered, strict=False)
 
     # Device
     use_cuda = (device == "cuda" and torch.cuda.is_available())
@@ -439,6 +801,7 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
             out = model(xb)
             preds_list.append(out.detach().cpu())
     preds = torch.cat(preds_list, dim=0)
+    _dlog(f"inference done, preds_shape={tuple(preds.shape)}")
     metrics = regression_metrics(preds, Y)
 
     # Print metrics

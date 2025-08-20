@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
+import copy
+
 
 def _try_load_yaml(path: str) -> Dict[str, Any]:
     try:
@@ -71,8 +73,29 @@ class AttentionConfig:
 
 
 @dataclass
+class TCNLayerConfig:
+    out_channels: int
+    kernel_size: int = 3
+    dilation: Optional[int] = None  # 若为 None，将按 1,2,4,... 自动推断
+    activation: str = "relu"       # relu|gelu|silu
+    use_weightnorm: bool = True
+
+
+@dataclass
+class TCNConfig:
+    enabled: bool = False
+    layers: List[TCNLayerConfig] = field(default_factory=lambda: [
+        TCNLayerConfig(out_channels=32, kernel_size=3),
+        TCNLayerConfig(out_channels=64, kernel_size=3),
+    ])
+    dropout: float = 0.0
+    use_batchnorm: bool = True
+
+
+@dataclass
 class ModelConfig:
     cnn: CNNConfig = field(default_factory=CNNConfig)
+    tcn: TCNConfig = field(default_factory=TCNConfig)
     lstm: LSTMConfig = field(default_factory=LSTMConfig)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     fc_hidden: int = 128
@@ -110,6 +133,8 @@ class CheckpointConfig:
     dir: str = "checkpoints"
     save_best_only: bool = True
     monitor: str = "val_loss"
+    # 额外导出最佳模型的目录；若为 None 则不额外导出
+    export_best_dir: Optional[str] = None
 
 
 @dataclass
@@ -176,9 +201,16 @@ class FullConfig:
                 CNNLayerConfig(**(l if isinstance(l, dict) else asdict(l)))
                 for l in cnn.layers
             ]
+        # TCN config
+        tcn = map_dataclass(TCNConfig, model.get("tcn"))
+        if isinstance(tcn.layers, list):
+            tcn.layers = [
+                TCNLayerConfig(**(l if isinstance(l, dict) else asdict(l)))
+                for l in tcn.layers
+            ]
         lstm = map_dataclass(LSTMConfig, model.get("lstm"))
         attention = map_dataclass(AttentionConfig, model.get("attention"))
-        model_cfg = ModelConfig(cnn=cnn, lstm=lstm, attention=attention,
+        model_cfg = ModelConfig(cnn=cnn, tcn=tcn, lstm=lstm, attention=attention,
                                 fc_hidden=model.get("fc_hidden", 128),
                                 forecast_horizon=model.get("forecast_horizon", 1))
 
@@ -226,4 +258,132 @@ def load_config(path: Optional[str]) -> FullConfig:
 
 def to_dict(cfg: FullConfig) -> Dict[str, Any]:
     return asdict(cfg)
+
+# ============ 严格评估所需：训练端规范化配置保存与校验 ============
+
+def canonicalize_for_checkpoint(cfg: 'FullConfig') -> 'FullConfig':
+    """生成一个配置副本，填充训练时实际使用/期望使用的关键字段，确保评估端严格解析。
+    - 当使用 TCN：确保 model.tcn.enabled=True 且 tcn.layers 完整，dilation 显式为整型；同时同步 cnn.variant='tcn'
+    - 当使用 dilated CNN：每层 dilation_rates 显式存在
+    - 注意力 multiscale：scales/fuse 显式存在
+    - 统一 add_positional_encoding 字段名
+    """
+    c = copy.deepcopy(cfg)
+    m = c.model
+
+    # 统一注意力字段名
+    try:
+        _ = m.attention.add_positional_encoding
+    except Exception:
+        try:
+            m.attention.add_positional_encoding = bool(getattr(m.attention, 'add_posional_encoding'))
+        except Exception:
+            m.attention.add_positional_encoding = False
+
+    cnn_variant = str(getattr(m.cnn, 'variant', 'standard')).lower()
+    is_tcn = bool(getattr(m.tcn, 'enabled', False) or cnn_variant == 'tcn')
+
+    if is_tcn:
+        # 显式开启并同步 variant
+        m.tcn.enabled = True
+        m.cnn.variant = 'tcn'
+        layers = list(getattr(m.tcn, 'layers', []) or [])
+        if len(layers) == 0:
+            # 从 cnn.layers 转换
+            default_d = 1
+            converted: List[TCNLayerConfig] = []
+            for l in m.cnn.layers:
+                d = getattr(l, 'dilation', None)
+                dil = default_d if d is None else int(d)
+                default_d = max(1, int(dil) * 2)
+                converted.append(TCNLayerConfig(
+                    out_channels=int(l.out_channels),
+                    kernel_size=int(getattr(l, 'kernel_size', 3)),
+                    dilation=int(dil),
+                    activation=str(getattr(l, 'activation', 'relu')),
+                    use_weightnorm=True,
+                ))
+            m.tcn.layers = converted
+        else:
+            # 修正 None dilation 为递增显式值
+            default_d = 1
+            fixed: List[TCNLayerConfig] = []
+            for tl in layers:
+                d = getattr(tl, 'dilation', None)
+                dil = default_d if d is None else int(d)
+                default_d = max(1, int(dil) * 2)
+                fixed.append(TCNLayerConfig(
+                    out_channels=int(tl.out_channels),
+                    kernel_size=int(getattr(tl, 'kernel_size', 3)),
+                    dilation=int(dil),
+                    activation=str(getattr(tl, 'activation', 'relu')),
+                    use_weightnorm=bool(getattr(tl, 'use_weightnorm', True)),
+                ))
+            m.tcn.layers = fixed
+
+    if str(getattr(m.cnn, 'variant', 'standard')).lower() == 'dilated':
+        fixed_layers: List[CNNLayerConfig] = []
+        for l in m.cnn.layers:
+            rates = getattr(l, 'dilation_rates', None) or [1, 2, 4]
+            rates = [int(x) for x in rates]
+            fixed = CNNLayerConfig(
+                out_channels=int(l.out_channels),
+                kernel_size=int(getattr(l, 'kernel_size', 3)),
+                stride=int(getattr(l, 'stride', 1)),
+                padding=getattr(l, 'padding', None),
+                dilation=int(getattr(l, 'dilation', 1)),
+                activation=str(getattr(l, 'activation', 'relu')),
+                pool=getattr(l, 'pool', 'max'),
+                pool_kernel_size=int(getattr(l, 'pool_kernel_size', 2)),
+            )
+            fixed.dilation_rates = rates
+            fixed_layers.append(fixed)
+        m.cnn.layers = fixed_layers
+
+    if str(getattr(m.attention, 'variant', 'standard')).lower() == 'multiscale':
+        if not getattr(m.attention, 'multiscale_scales', None):
+            m.attention.multiscale_scales = [1, 2]
+        if not getattr(m.attention, 'multiscale_fuse', None):
+            m.attention.multiscale_fuse = 'sum'
+
+    return c
+
+
+def validate_full_config_strict(cfg: 'FullConfig') -> None:
+    """训练端严格校验：缺失/None/错误类型直接抛错，避免保存无效 cfg。"""
+    m = cfg.model
+    # CNN/TCN 骨干
+    if str(getattr(m.cnn, 'variant', 'standard')).lower() == 'tcn' or getattr(m.tcn, 'enabled', False):
+        if not getattr(m.tcn, 'layers', None):
+            raise ValueError('TCN 启用但缺少 model.tcn.layers')
+        for i, l in enumerate(m.tcn.layers):
+            if l.out_channels is None or l.kernel_size is None or l.dilation is None:
+                raise ValueError(f'TCN 第{i}层缺少 out_channels/kernel_size/dilation')
+    else:
+        if not getattr(m.cnn, 'layers', None):
+            raise ValueError('CNN 缺少 model.cnn.layers')
+        if str(getattr(m.cnn, 'variant', 'standard')).lower() == 'dilated':
+            for i, l in enumerate(m.cnn.layers):
+                if not getattr(l, 'dilation_rates', None):
+                    raise ValueError(f'dilated CNN 第{i}层缺少 dilation_rates')
+    # RNN
+    if m.lstm.rnn_type not in ('lstm','gru'):
+        raise ValueError('lstm.rnn_type 必须为 lstm 或 gru')
+    for k in ['hidden_size','num_layers','bidirectional','dropout']:
+        if getattr(m.lstm, k, None) is None:
+            raise ValueError(f'lstm.{k} 不能为空')
+    # Attention
+    if m.attention.enabled:
+        if m.attention.variant not in ('standard','multiscale'):
+            raise ValueError('attention.variant 必须为 standard 或 multiscale')
+        if m.attention.num_heads is None or m.attention.dropout is None:
+            raise ValueError('attention.num_heads/dropout 不能为空')
+        if not hasattr(m.attention, 'add_positional_encoding'):
+            raise ValueError('attention 缺少 add_positional_encoding 字段')
+        if m.attention.variant == 'multiscale':
+            if not getattr(m.attention, 'multiscale_scales', None):
+                raise ValueError('attention.multiscale_scales 不能为空')
+            if not getattr(m.attention, 'multiscale_fuse', None):
+                raise ValueError('attention.multiscale_fuse 不能为空')
+
 

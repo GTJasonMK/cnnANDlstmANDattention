@@ -11,6 +11,7 @@ from gru_processor import GRUProcessor
 from attention_mechanism import MultiHeadSelfAttention
 from advanced_cnn import AdvancedCNNFeatureExtractor
 from improved_attention import MultiScaleTemporalAttention
+from tcn_feature_extractor import TCNFeatureExtractor
 
 
 class CNNLSTMAttentionModel(nn.Module):
@@ -51,7 +52,7 @@ class CNNLSTMAttentionModel(nn.Module):
         n_targets: int = 1,
         attn_add_pos_enc: bool = False,
         lstm_dropout: Optional[float] = None,
-        cnn_variant: str = "standard",  # "standard"|"depthwise"|"dilated"
+        cnn_variant: str = "standard",  # "standard"|"depthwise"|"dilated"|"tcn"
         attn_variant: str = "standard",  # "standard"|"multiscale"
         multiscale_scales: Optional[List[int]] = None,
         multiscale_fuse: str = "sum",
@@ -61,22 +62,32 @@ class CNNLSTMAttentionModel(nn.Module):
         self.n_targets = int(n_targets)
         self.attn_enabled = bool(attn_enabled)
 
-        # CNN backbone variant
-        if (cnn_variant or "standard").lower() == "standard":
+        # CNN/TCN 特征提取骨干
+        _backbone = (cnn_variant or "standard").lower()
+        if _backbone == "standard":
             self.cnn = CNNFeatureExtractor(
                 in_channels=num_features,
                 layer_configs=cnn_layers,
                 use_batchnorm=use_batchnorm,
                 dropout=cnn_dropout,
             )
-        else:
+        elif _backbone in ("depthwise", "dilated"):
             self.cnn = AdvancedCNNFeatureExtractor(
                 in_channels=num_features,
                 layer_configs=cnn_layers,
                 use_batchnorm=use_batchnorm,
                 dropout=cnn_dropout,
-                architecture_type=cnn_variant,
+                architecture_type=_backbone,
             )
+        elif _backbone == "tcn":
+            self.cnn = TCNFeatureExtractor(
+                in_channels=num_features,
+                layer_configs=cnn_layers,
+                use_batchnorm=use_batchnorm,
+                dropout=cnn_dropout,
+            )
+        else:
+            raise ValueError(f"Unsupported cnn/tcn variant: {cnn_variant}")
 
         # Recurrent backbone: LSTM (default) or GRU (via cnn_variant "gru"? use attn_variant? We'll use new param rnn_type)
         rnn_type = getattr(self, 'rnn_type', 'lstm')
