@@ -116,11 +116,17 @@ class Trainer:
         x, y = batch
         x = x.to(self.device)
         y = y.to(self.device)
-        self.optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=self.amp):
+        # use new autocast API if available
+        try:
+            from torch import amp as _amp  # type: ignore
+            autocast_ctx = _amp.autocast(device_type='cuda', enabled=self.amp)
+        except Exception:
+            autocast_ctx = torch.cuda.amp.autocast(enabled=self.amp)
+        with autocast_ctx:
             preds = self.model(x)
             loss = self.criterion(preds, y)
         if train:
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             if self.cfg.train.gradient_clip is not None:
                 self.scaler.unscale_(self.optimizer)

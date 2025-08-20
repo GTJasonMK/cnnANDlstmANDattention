@@ -11,8 +11,67 @@ from config import load_config
 from data_preprocessor import load_array_from_path, create_dataloaders
 from model_architecture import CNNLSTMAttentionModel
 from trainer import Trainer
-from visualizer import plot_losses, plot_lr, plot_predictions, plot_attention_heatmap
+from evaluator import evaluate_model
+from visualizer import (
+    plot_losses, plot_losses_logscale, plot_lr, plot_grad_norm, plot_param_count,
+    plot_predictions, plot_residual_hist, plot_prediction_interval, plot_multihorizon_error,
+    plot_attention_heatmap, plot_attention_multihead, plot_lstm_hidden_heatmap, plot_cnn_feature_maps,
+    plot_series_distribution, plot_corr_heatmap, plot_split_distribution, plot_temporal_performance,
+)
 
+
+# 环境与种子设置
+import random
+
+def setup_env(cfg):
+    # 随机种子
+    seed = int(getattr(cfg.train, 'seed', 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # cuDNN 设置
+    det = getattr(cfg.train, 'deterministic', None)
+    bench = getattr(cfg.train, 'cudnn_benchmark', None)
+    if det is not None:
+        torch.backends.cudnn.deterministic = bool(det)
+        # 当 deterministic=True，通常需要将 benchmark 关掉
+        if det:
+            torch.backends.cudnn.benchmark = False
+    if bench is not None:
+        torch.backends.cudnn.benchmark = bool(bench)
+
+    # matmul 精度（PyTorch>=2.0）
+    try:
+        if getattr(cfg.train, 'matmul_precision', None):
+            torch.set_float32_matmul_precision(cfg.train.matmul_precision)
+    except Exception:
+        pass
+
+    # 统一输出目录：output_dir > visual_save_dir/train.checkpoints.dir/train.log_dir
+    base_out = getattr(cfg, 'output_dir', None)
+    if base_out:
+        os.makedirs(base_out, exist_ok=True)
+        # image dir
+        cfg.visual_save_dir = os.path.join(base_out, cfg.visual_save_dir or 'image')
+        # checkpoints dir
+        ckpt_dir = getattr(cfg.train.checkpoints, 'dir', 'checkpoints')
+        cfg.train.checkpoints.dir = os.path.join(base_out, ckpt_dir)
+        # tensorboard dir
+        log_dir = getattr(cfg.train, 'log_dir', 'runs')
+        cfg.train.log_dir = os.path.join(base_out, log_dir)
+    # 创建最终目录
+    os.makedirs(cfg.visual_save_dir, exist_ok=True)
+    os.makedirs(cfg.train.checkpoints.dir, exist_ok=True)
+    os.makedirs(cfg.train.log_dir, exist_ok=True)
+
+    # 可视化保存目录传给可视化模块（通过环境变量简化改动）
+    os.environ["VIS_SAVE_DIR"] = getattr(cfg, 'visual_save_dir', 'image')
+
+
+# 统一的数据/模型构建
 
 def build_model_with_data(cfg, input_size: int, n_targets: int):
     # Build model from cfg but override num_features and targets
@@ -32,16 +91,25 @@ def build_model_with_data(cfg, input_size: int, n_targets: int):
         forecast_horizon=m.forecast_horizon,
         n_targets=n_targets,
         attn_add_pos_enc=m.attention.add_positional_encoding,
+        lstm_dropout=m.lstm.dropout,
     )
     return model
 
 
-def main(config_path: Optional[str]):
-    cfg = load_config(config_path)
-    # load data
+def prepare_run(cfg):
+    # 数据加载（一次读取，后续可复用数据数组）
     if cfg.data.data_path is None:
         raise ValueError("Please provide data.data_path in config pointing to CSV/NPZ/NPY")
     data = load_array_from_path(cfg.data.data_path)
+
+    # DataLoader 性能参数（根据设备/用户配置推断）
+    use_cuda = torch.cuda.is_available()
+    pin_memory = True if use_cuda else False
+    # 若用户已在 cfg.data.num_workers 指定，则尊重；否则自动给个较合理默认
+    num_workers = cfg.data.num_workers if cfg.data.num_workers is not None else (os.cpu_count() or 0)
+    persistent_workers = True if (num_workers and num_workers > 0) else False
+    prefetch_factor = 2 if (num_workers and num_workers > 0) else None
+
     train_loader, val_loader, test_loader, input_size, n_targets = create_dataloaders(
         data=data,
         sequence_length=cfg.data.sequence_length,
@@ -52,58 +120,93 @@ def main(config_path: Optional[str]):
         batch_size=cfg.data.batch_size,
         train_split=cfg.data.train_split,
         val_split=cfg.data.val_split,
-        num_workers=cfg.data.num_workers,
+        num_workers=num_workers,
         shuffle_train=cfg.data.shuffle_train,
         drop_last=cfg.data.drop_last,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     model = build_model_with_data(cfg, input_size, n_targets)
+    return data, model, (train_loader, val_loader, test_loader)
+
+
+def run(cfg, resume_path: Optional[str] = None):
+    setup_env(cfg)
+    data, model, (train_loader, val_loader, test_loader) = prepare_run(cfg)
+
     trainer = Trainer(model, cfg)
+    if resume_path:
+        last_epoch = trainer.load_checkpoint(resume_path)
+        print(f"Resumed from epoch {last_epoch}")
+
     history = trainer.fit(train_loader, val_loader)
 
-    # visualize (only save, do not show)
-    plot_losses(history)
-    plot_lr(history)
-    # predictions and attention
+    # 可视化与评估开关
+    if getattr(cfg, 'visual_enabled', True):
+        plot_losses(history)
+        plot_losses_logscale(history)
+        plot_lr(history)
+        try:
+            param_count = sum(p.numel() for p in model.parameters())
+            plot_param_count(param_count)
+        except Exception:
+            pass
+
+    # 预测与指标
     preds, targets = trainer.predict(test_loader)
-    plot_predictions(preds, targets)
-    # one forward with attn
-    model.eval()
-    with torch.no_grad():
-        for x, _ in test_loader:
-            out, attn = model(x, return_attn=True)
-            plot_attention_heatmap(attn)
-            break
+    metrics = evaluate_model(model, test_loader, trainer.device)
+    print({k: round(v, 6) for k, v in metrics.items()})
+
+    if getattr(cfg, 'visual_enabled', True):
+        plot_predictions(preds, targets)
+        plot_residual_hist(preds, targets)
+        plot_multihorizon_error(preds, targets)
+        # 使用首次读取的 data 做数据分析，避免重复 IO
+        try:
+            plot_series_distribution(data)
+            plot_corr_heatmap(data)
+        except Exception:
+            pass
+
+        # 注意力图（若启用）
+        model.eval()
+        with torch.no_grad():
+            for x, _ in test_loader:
+                x = x.to(trainer.device, non_blocking=True)
+                _, attn = model(x, return_attn=True)
+                plot_attention_heatmap(attn)
+                if attn is not None:
+                    plot_attention_multihead(attn)
+                break
+
+    return history, metrics
+
+
+
+def main(config_path: Optional[str], resume_path: Optional[str] = None):
+    cfg = load_config(config_path)
+    return run(cfg, resume_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to JSON/YAML config file")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
+    parser.add_argument("--output_dir", type=str, default=None, help="Base output directory (overrides config.output_dir)")
+    parser.add_argument("--image_dir", type=str, default=None, help="Image output directory (overrides visual_save_dir)")
+    parser.add_argument("--ckpt_dir", type=str, default=None, help="Checkpoints directory (overrides train.checkpoints.dir)")
     args = parser.parse_args()
-    if args.resume:
-        cfg = load_config(args.config)
-        from data_preprocessor import load_array_from_path, create_dataloaders
-        data = load_array_from_path(cfg.data.data_path)
-        train_loader, val_loader, test_loader, input_size, n_targets = create_dataloaders(
-            data=data,
-            sequence_length=cfg.data.sequence_length,
-            horizon=cfg.data.horizon,
-            feature_indices=cfg.data.feature_indices,
-            target_indices=cfg.data.target_indices,
-            normalize=cfg.data.normalize,
-            batch_size=cfg.data.batch_size,
-            train_split=cfg.data.train_split,
-            val_split=cfg.data.val_split,
-            num_workers=cfg.data.num_workers,
-            shuffle_train=cfg.data.shuffle_train,
-            drop_last=cfg.data.drop_last,
-        )
-        model = build_model_with_data(cfg, input_size, n_targets)
-        trainer = Trainer(model, cfg)
-        last_epoch = trainer.load_checkpoint(args.resume)
-        print(f"Resumed from epoch {last_epoch}")
-        history = trainer.fit(train_loader, val_loader)
-    else:
-        main(args.config)
+
+    # 应用 CLI 覆盖
+    cfg = load_config(args.config)
+    if args.output_dir:
+        cfg.output_dir = args.output_dir
+    if args.image_dir:
+        cfg.visual_save_dir = args.image_dir
+    if args.ckpt_dir:
+        cfg.train.checkpoints.dir = args.ckpt_dir
+
+    run(cfg, resume_path=args.resume)
 

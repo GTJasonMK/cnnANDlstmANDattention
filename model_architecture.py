@@ -47,6 +47,7 @@ class CNNLSTMAttentionModel(nn.Module):
         forecast_horizon: int,
         n_targets: int = 1,
         attn_add_pos_enc: bool = False,
+        lstm_dropout: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.horizon = int(forecast_horizon)
@@ -64,7 +65,7 @@ class CNNLSTMAttentionModel(nn.Module):
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             bidirectional=bidirectional,
-            dropout=cnn_dropout,
+            dropout=(cnn_dropout if lstm_dropout is None else float(lstm_dropout)),
             return_sequence=True,
         )
         attn_dim = self.lstm.output_size
@@ -98,26 +99,4 @@ class CNNLSTMAttentionModel(nn.Module):
         else:
             out = out.view(-1, self.horizon, self.n_targets)
         return (out, attn_w) if return_attn else out
-
-    @staticmethod
-    def from_config(cfg) -> "CNNLSTMAttentionModel":
-        from config import FullConfig
-        if not hasattr(cfg, "model"):
-            raise ValueError("Expect FullConfig or object with .model")
-        m = cfg.model
-        cnn_layers = [vars(l) if not isinstance(l, dict) else l for l in m.cnn.layers]
-        return CNNLSTMAttentionModel(
-            num_features=0,  # to be filled at runtime based on data
-            cnn_layers=cnn_layers,
-            use_batchnorm=m.cnn.use_batchnorm,
-            cnn_dropout=m.cnn.dropout,
-            lstm_hidden=m.lstm.hidden_size,
-            lstm_layers=m.lstm.num_layers,
-            bidirectional=m.lstm.bidirectional,
-            attn_enabled=m.attention.enabled,
-            attn_heads=m.attention.num_heads,
-            attn_dropout=m.attention.dropout,
-            fc_hidden=m.fc_hidden,
-            forecast_horizon=m.forecast_horizon,
-        )
 

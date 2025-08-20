@@ -123,6 +123,9 @@ def create_dataloaders(
     num_workers: int = 0,
     shuffle_train: bool = True,
     drop_last: bool = False,
+    pin_memory: Optional[bool] = None,
+    persistent_workers: Optional[bool] = None,
+    prefetch_factor: Optional[int] = None,
 ):
     """Create train/val/test DataLoaders with normalization fit on train split only.
 
@@ -179,9 +182,22 @@ def create_dataloaders(
     val_set = Subset(full_ds, idx_val)
     test_set = Subset(full_ds, idx_test)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers, drop_last=drop_last)
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    # DataLoader kwargs with performance hints
+    def _dl_kwargs():
+        kw = dict(num_workers=num_workers)
+        if pin_memory is not None:
+            kw["pin_memory"] = pin_memory
+        if num_workers and num_workers > 0:
+            if persistent_workers is not None:
+                kw["persistent_workers"] = persistent_workers
+            if prefetch_factor is not None:
+                kw["prefetch_factor"] = prefetch_factor
+        return kw
+
+    base_kwargs = _dl_kwargs()
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle_train, drop_last=drop_last, **base_kwargs)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, **base_kwargs)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, **base_kwargs)
 
     input_size = len(full_ds.input_idx)
     n_targets = len(full_ds.target_idx)

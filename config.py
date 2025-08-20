@@ -131,6 +131,9 @@ class TrainingConfig:
     log_dir: str = "runs"
     seed: int = 42
     print_every: int = 50
+    deterministic: Optional[bool] = None
+    cudnn_benchmark: Optional[bool] = None
+    matmul_precision: Optional[str] = None  # e.g., "high", "medium"
 
 
 @dataclass
@@ -139,6 +142,9 @@ class FullConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainingConfig = field(default_factory=TrainingConfig)
     device: Optional[str] = None  # auto if None
+    output_dir: Optional[str] = None  # base dir for all outputs
+    visual_save_dir: str = "image"
+    visual_enabled: bool = True
 
     @staticmethod
     def from_dict(cfg: Dict[str, Any]) -> "FullConfig":
@@ -183,8 +189,14 @@ class FullConfig:
             log_dir=cfg.get("train", {}).get("log_dir", "runs"),
             seed=cfg.get("train", {}).get("seed", 42),
             print_every=cfg.get("train", {}).get("print_every", 50),
+            deterministic=cfg.get("train", {}).get("deterministic", None),
+            cudnn_benchmark=cfg.get("train", {}).get("cudnn_benchmark", None),
+            matmul_precision=cfg.get("train", {}).get("matmul_precision", None),
         )
-        return FullConfig(model=model_cfg, data=data_cfg, train=train_cfg, device=cfg.get("device"))
+        return FullConfig(model=model_cfg, data=data_cfg, train=train_cfg, device=cfg.get("device"),
+                          output_dir=cfg.get("output_dir", None),
+                          visual_save_dir=cfg.get("visual_save_dir", "image"),
+                          visual_enabled=cfg.get("visual_enabled", True))
 
 
 def load_config(path: Optional[str]) -> FullConfig:

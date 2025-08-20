@@ -20,7 +20,7 @@ model:
     add_positional_encoding: false
 
 data:
-  data_path: data\simulated.csv
+  data_path: data\all_six_datasets\weather\weather_removed.csv
   sequence_length: 64
   horizon: 3
   feature_indices: null
