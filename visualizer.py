@@ -7,13 +7,20 @@ import numpy as np
 import torch
 import os
 
-DEFAULT_SAVE_DIR = os.environ.get("VIS_SAVE_DIR", "image")
+# 注意：不要在模块导入时读取环境变量，避免在 main.setup_env 之后无法生效
+DEFAULT_SAVE_DIR = "image"
 
 def _ensure_dir(path: str):
     if path and not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
 
-def _savefig(filename: str, save_dir: str = DEFAULT_SAVE_DIR):
+def _savefig(filename: str, save_dir: Optional[str] = None):
+    """保存图像到指定目录。
+    优先级：参数传入的 save_dir > 环境变量 VIS_SAVE_DIR > DEFAULT_SAVE_DIR
+    """
+    # 运行时动态读取环境变量，确保 main.setup_env 设置的目录能生效
+    if save_dir is None:
+        save_dir = os.environ.get("VIS_SAVE_DIR", DEFAULT_SAVE_DIR)
     _ensure_dir(save_dir)
     full = os.path.join(save_dir, filename)
     try:

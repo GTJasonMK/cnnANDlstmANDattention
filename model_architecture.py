@@ -7,7 +7,10 @@ import torch.nn as nn
 
 from cnn_feature_extractor import CNNFeatureExtractor
 from lstm_processor import LSTMProcessor
+from gru_processor import GRUProcessor
 from attention_mechanism import MultiHeadSelfAttention
+from advanced_cnn import AdvancedCNNFeatureExtractor
+from improved_attention import MultiScaleTemporalAttention
 
 
 class CNNLSTMAttentionModel(nn.Module):
@@ -48,31 +51,64 @@ class CNNLSTMAttentionModel(nn.Module):
         n_targets: int = 1,
         attn_add_pos_enc: bool = False,
         lstm_dropout: Optional[float] = None,
+        cnn_variant: str = "standard",  # "standard"|"depthwise"|"dilated"
+        attn_variant: str = "standard",  # "standard"|"multiscale"
+        multiscale_scales: Optional[List[int]] = None,
+        multiscale_fuse: str = "sum",
     ) -> None:
         super().__init__()
         self.horizon = int(forecast_horizon)
         self.n_targets = int(n_targets)
         self.attn_enabled = bool(attn_enabled)
 
-        self.cnn = CNNFeatureExtractor(
-            in_channels=num_features,
-            layer_configs=cnn_layers,
-            use_batchnorm=use_batchnorm,
-            dropout=cnn_dropout,
-        )
-        self.lstm = LSTMProcessor(
-            input_size=self.cnn.out_channels,
-            hidden_size=lstm_hidden,
-            num_layers=lstm_layers,
-            bidirectional=bidirectional,
-            dropout=(cnn_dropout if lstm_dropout is None else float(lstm_dropout)),
-            return_sequence=True,
-        )
-        attn_dim = self.lstm.output_size
-        if self.attn_enabled:
-            self.attn = MultiHeadSelfAttention(
-                d_model=attn_dim, num_heads=attn_heads, dropout=attn_dropout, add_positional_encoding=attn_add_pos_enc
+        # CNN backbone variant
+        if (cnn_variant or "standard").lower() == "standard":
+            self.cnn = CNNFeatureExtractor(
+                in_channels=num_features,
+                layer_configs=cnn_layers,
+                use_batchnorm=use_batchnorm,
+                dropout=cnn_dropout,
             )
+        else:
+            self.cnn = AdvancedCNNFeatureExtractor(
+                in_channels=num_features,
+                layer_configs=cnn_layers,
+                use_batchnorm=use_batchnorm,
+                dropout=cnn_dropout,
+                architecture_type=cnn_variant,
+            )
+
+        # Recurrent backbone: LSTM (default) or GRU (via cnn_variant "gru"? use attn_variant? We'll use new param rnn_type)
+        rnn_type = getattr(self, 'rnn_type', 'lstm')
+        if rnn_type.lower() == 'gru':
+            self.rnn = GRUProcessor(
+                input_size=self.cnn.out_channels,
+                hidden_size=lstm_hidden,
+                num_layers=lstm_layers,
+                bidirectional=bidirectional,
+                dropout=(cnn_dropout if lstm_dropout is None else float(lstm_dropout)),
+                return_sequence=True,
+            )
+        else:
+            self.rnn = LSTMProcessor(
+                input_size=self.cnn.out_channels,
+                hidden_size=lstm_hidden,
+                num_layers=lstm_layers,
+                bidirectional=bidirectional,
+                dropout=(cnn_dropout if lstm_dropout is None else float(lstm_dropout)),
+                return_sequence=True,
+            )
+        attn_dim = self.rnn.output_size
+        if self.attn_enabled:
+            if (attn_variant or "standard").lower() == "multiscale":
+                self.attn = MultiScaleTemporalAttention(
+                    d_model=attn_dim, num_heads=attn_heads, dropout=attn_dropout,
+                    scales=multiscale_scales or [1, 2], fuse=multiscale_fuse
+                )
+            else:
+                self.attn = MultiHeadSelfAttention(
+                    d_model=attn_dim, num_heads=attn_heads, dropout=attn_dropout, add_positional_encoding=attn_add_pos_enc
+                )
         else:
             self.attn = None
 
@@ -83,11 +119,18 @@ class CNNLSTMAttentionModel(nn.Module):
             nn.Linear(fc_hidden, self.horizon * self.n_targets),
         )
 
+        # Save variants for reference/serialization
+        self.cnn_variant = cnn_variant
+        self.attn_variant = attn_variant
+        self.multiscale_scales = multiscale_scales or [1, 2]
+        self.multiscale_fuse = multiscale_fuse
+        self.rnn_type = 'lstm'  # default; Can be switched via config and main
+
     def forward(self, x: torch.Tensor, return_attn: bool = False):
         if x.dim() != 3:
             raise ValueError(f"Expected input (B, T, F), got {tuple(x.shape)}")
         y = self.cnn(x)  # (B, T, C)
-        y, _ = self.lstm(y)  # (B, T, H)
+        y, _ = self.rnn(y)  # (B, T, H)
         attn_w = None
         if self.attn is not None:
             y, attn_w = self.attn(y, need_weights=return_attn)

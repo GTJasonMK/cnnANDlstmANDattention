@@ -1,0 +1,70 @@
+device: cuda
+output_dir: outputs/exp_3080ti_lowloss
+visual_save_dir: image
+visual_enabled: true
+
+model:
+  fc_hidden: 256
+  forecast_horizon: 3
+  cnn:
+    variant: dilated     # 强表达，略慢
+    dropout: 0.05
+    use_batchnorm: true
+    layers:
+      - {out_channels: 64, kernel_size: 5, activation: relu, pool: max, pool_kernel_size: 2, dilation_rates: [1,2,4]}
+      - {out_channels: 128, kernel_size: 3, activation: gelu, pool: max, pool_kernel_size: 2, dilation_rates: [1,2,4]}
+  lstm:
+    rnn_type: lstm
+    hidden_size: 256
+    num_layers: 2
+    bidirectional: true
+    dropout: 0.1
+  attention:
+    enabled: true
+    variant: multiscale
+    num_heads: 8
+    dropout: 0.1
+    add_positional_encoding: false
+    multiscale_scales: [1, 2]
+    multiscale_fuse: sum
+
+data:
+  data_path: data/simulated.csv   # TODO: 改为你的实际数据路径
+  sequence_length: 64
+  horizon: 3
+  feature_indices: null
+  target_indices: null
+  train_split: 0.7
+  val_split: 0.15
+  normalize: standard
+  batch_size: 256      # 为稳定性稍小于速度配置
+  num_workers: 12
+  shuffle_train: true
+  drop_last: true
+
+train:
+  epochs: 50
+  loss: mse
+  optimizer:
+    name: adamw
+    lr: 0.001
+    weight_decay: 0.0001
+  scheduler:
+    name: cosine
+    T_max: 50
+  early_stopping:
+    enabled: true
+    patience: 8
+    min_delta: 0.0
+  checkpoints:
+    dir: checkpoints/3080ti_lowloss
+    save_best_only: true
+  gradient_clip: 1.0
+  mixed_precision: true
+  log_dir: runs/3080ti_lowloss
+  seed: 42
+  print_every: 50
+  deterministic: false
+  cudnn_benchmark: true
+  matmul_precision: high
+

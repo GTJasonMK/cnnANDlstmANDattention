@@ -90,9 +90,18 @@ def build_model_with_data(cfg, input_size: int, n_targets: int):
         fc_hidden=m.fc_hidden,
         forecast_horizon=m.forecast_horizon,
         n_targets=n_targets,
-        attn_add_pos_enc=m.attention.add_positional_encoding,
+        attn_add_pos_enc=m.attention.add_posional_encoding if hasattr(m.attention, 'add_posional_encoding') else m.attention.add_positional_encoding,
         lstm_dropout=m.lstm.dropout,
+        cnn_variant=getattr(m.cnn, 'variant', 'standard'),
+        attn_variant=getattr(m.attention, 'variant', 'standard'),
+        multiscale_scales=getattr(m.attention, 'multiscale_scales', [1, 2]),
+        multiscale_fuse=getattr(m.attention, 'multiscale_fuse', 'sum'),
     )
+    # 设置RNN类型（LSTM/GRU）
+    try:
+        model.rnn_type = getattr(m.lstm, 'rnn_type', 'lstm')
+    except Exception:
+        model.rnn_type = 'lstm'
     return model
 
 

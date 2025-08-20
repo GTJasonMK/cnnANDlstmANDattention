@@ -27,15 +27,19 @@ class CNNLayerConfig:
     out_channels: int
     kernel_size: int = 3
     stride: int = 1
-    padding: Optional[int] = None  # if None -> same padding
+    padding: Optional[int] = None  # 如果为 None 表示 same padding
     dilation: int = 1
     activation: str = "relu"
-    pool: Optional[str] = "max"  # "max", "avg", or None
+    pool: Optional[str] = "max"  # "max", "avg", 或 None
     pool_kernel_size: int = 2
+    # 为支持高级 CNN 结构（如 dilated），允许在层级上提供可选的扩张率列表
+    dilation_rates: Optional[List[int]] = None
 
 
 @dataclass
 class CNNConfig:
+    # CNN 变体：standard|depthwise|dilated
+    variant: str = "standard"
     layers: List[CNNLayerConfig] = field(default_factory=lambda: [
         CNNLayerConfig(out_channels=32, kernel_size=5),
         CNNLayerConfig(out_channels=64, kernel_size=3),
@@ -50,14 +54,20 @@ class LSTMConfig:
     num_layers: int = 2
     bidirectional: bool = True
     dropout: float = 0.1
+    rnn_type: str = "lstm"  # lstm|gru
 
 
 @dataclass
 class AttentionConfig:
     enabled: bool = True
+    # 注意力变体：standard|multiscale
+    variant: str = "standard"
     num_heads: int = 4
     dropout: float = 0.1
     add_positional_encoding: bool = False
+    # 多尺度注意力的可选参数
+    multiscale_scales: Optional[List[int]] = field(default_factory=lambda: [1, 2])
+    multiscale_fuse: str = "sum"  # "sum" 或 "concat"
 
 
 @dataclass
