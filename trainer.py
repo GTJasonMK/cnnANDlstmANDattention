@@ -5,14 +5,14 @@ import os
 from dataclasses import asdict
 from typing import Dict, Tuple, Optional
 
-from config import canonicalize_for_checkpoint, validate_full_config_strict
+from configs.config import canonicalize_for_checkpoint, validate_full_config_strict
 
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
-from config import FullConfig
+from configs.config import FullConfig
 
 
 def _get_device(cfg: FullConfig) -> torch.device:

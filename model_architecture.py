@@ -5,13 +5,13 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from cnn_feature_extractor import CNNFeatureExtractor
-from lstm_processor import LSTMProcessor
-from gru_processor import GRUProcessor
-from attention_mechanism import MultiHeadSelfAttention
-from advanced_cnn import AdvancedCNNFeatureExtractor
-from improved_attention import MultiScaleTemporalAttention
-from tcn_feature_extractor import TCNFeatureExtractor
+from cnn.cnn_feature_extractor import CNNFeatureExtractor
+from rnn.lstm_processor import LSTMProcessor
+from rnn.gru_processor import GRUProcessor
+from attention.attention_mechanism import MultiHeadSelfAttention
+from cnn.advanced_cnn import AdvancedCNNFeatureExtractor
+from attention.improved_attention import MultiScaleTemporalAttention
+from cnn.tcn_feature_extractor import TCNFeatureExtractor
 
 
 class CNNLSTMAttentionModel(nn.Module):

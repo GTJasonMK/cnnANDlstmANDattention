@@ -27,7 +27,7 @@ from typing import Optional, List, Dict, Any
 import numpy as np
 
 # 复用单模型评估逻辑
-from standalone_eval import evaluate, parse_indices, _extract_arch_meta
+from eval.standalone_eval import evaluate, parse_indices, _extract_arch_meta
 
 # 强制严格模式：要求 checkpoint 中 cfg 完整准确
 os.environ.setdefault("EVAL_STRICT", "1")

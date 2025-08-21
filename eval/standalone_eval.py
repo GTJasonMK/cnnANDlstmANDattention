@@ -38,6 +38,8 @@ import torch.nn as nn
 import traceback
 
 # Only import core model
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from model_architecture import CNNLSTMAttentionModel
 
 
@@ -189,18 +191,26 @@ def regression_metrics(preds: torch.Tensor | np.ndarray, targets: torch.Tensor |
 # Robust casting helpers
 # -----------------------------
 
-def _as_int(val, default: int) -> int:
+def _as_int(val, default: Optional[int] = None) -> Optional[int]:
     try:
-        return int(val) if val is not None else int(default)
-    except Exception:
+        if val is not None:
+            return int(val)
+        if default is None:
+            return None
         return int(default)
-
-
-def _as_float(val, default: float) -> float:
-    try:
-        return float(val) if val is not None else float(default)
     except Exception:
+        return None if default is None else int(default)
+
+
+def _as_float(val, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if val is not None:
+            return float(val)
+        if default is None:
+            return None
         return float(default)
+    except Exception:
+        return None if default is None else float(default)
 
 
 def _as_bool(val, default: bool) -> bool:

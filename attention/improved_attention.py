@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from attention_mechanism import MultiHeadSelfAttention
+from attention.attention_mechanism import MultiHeadSelfAttention
 
 
 class MultiScaleTemporalAttention(nn.Module):
