@@ -39,6 +39,7 @@ class TemporalBlock(nn.Module):
     - 残差分支用 1x1 调整通道数以匹配主分支
     - 归一化可选 BatchNorm1d
     - 权重归一化可选（施加于卷积层）
+    - 可选门控激活（gated）：第二条分支作为门控，输出 y * sigmoid(gate)
     """
     def __init__(self, in_c: int, out_c: int, kernel_size: int, dilation: int,
                  activation: str = "relu", dropout: float = 0.0,
@@ -47,11 +48,19 @@ class TemporalBlock(nn.Module):
         self.use_batchnorm = use_batchnorm
         self.dropout_p = float(dropout)
         self.activation = activation.lower()
+        self.gated = (self.activation == 'gated')
 
         self.conv1 = _CausalConv1d(in_c, out_c, kernel_size, dilation, use_weightnorm=use_weightnorm)
         self.bn1 = nn.BatchNorm1d(out_c) if use_batchnorm else nn.Identity()
         self.conv2 = _CausalConv1d(out_c, out_c, kernel_size, dilation, use_weightnorm=use_weightnorm)
         self.bn2 = nn.BatchNorm1d(out_c) if use_batchnorm else nn.Identity()
+
+        if self.gated:
+            self.gate1 = _CausalConv1d(in_c, out_c, kernel_size, dilation, use_weightnorm=use_weightnorm)
+            self.gate2 = _CausalConv1d(out_c, out_c, kernel_size, dilation, use_weightnorm=use_weightnorm)
+        else:
+            self.gate1 = nn.Identity()
+            self.gate2 = nn.Identity()
 
         self.drop1 = nn.Dropout(p=self.dropout_p) if self.dropout_p > 0 else nn.Identity()
         self.drop2 = nn.Dropout(p=self.dropout_p) if self.dropout_p > 0 else nn.Identity()
@@ -60,6 +69,9 @@ class TemporalBlock(nn.Module):
         self.downsample = nn.Conv1d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
 
     def _act(self, x: torch.Tensor) -> torch.Tensor:
+        if self.gated:
+            # 门控：对 x 应用 sigmoid 做门控
+            return torch.sigmoid(x)
         if self.activation == "relu":
             return F.relu(x, inplace=True)
         if self.activation == "gelu":
@@ -71,17 +83,23 @@ class TemporalBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, T)
         y = self.conv1(x)
+        if self.gated:
+            g1 = self.gate1(x)
+            y = y * torch.sigmoid(g1)
         y = self.bn1(y)
         y = self._act(y)
         y = self.drop1(y)
 
-        y = self.conv2(y)
-        y = self.bn2(y)
-        y = self._act(y)
-        y = self.drop2(y)
+        y2 = self.conv2(y)
+        if self.gated:
+            g2 = self.gate2(y)
+            y2 = y2 * torch.sigmoid(g2)
+        y2 = self.bn2(y2)
+        y2 = self._act(y2)
+        y2 = self.drop2(y2)
 
         res = self.downsample(x)
-        return y + res
+        return y2 + res
 
 
 class TCNFeatureExtractor(nn.Module):

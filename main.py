@@ -100,6 +100,13 @@ def build_model_with_data(cfg, input_size: int, n_targets: int):
         attn_variant=getattr(m.attention, 'variant', 'standard'),
         multiscale_scales=getattr(m.attention, 'multiscale_scales', [1, 2]),
         multiscale_fuse=getattr(m.attention, 'multiscale_fuse', 'sum'),
+        attn_positional_mode=getattr(m.attention, 'positional_mode', 'none'),
+        local_window_size=getattr(m.attention, 'local_window_size', 64),
+        local_dilation=getattr(m.attention, 'local_dilation', 1),
+        cnn_use_channel_attention=getattr(m.cnn, 'use_channel_attention', False),
+        cnn_channel_attention_type=getattr(m.cnn, 'channel_attention_type', 'eca'),
+        normalization=getattr(m, 'normalization', None),
+        decomposition=getattr(m, 'decomposition', None),
     )
     # 设置RNN类型（LSTM/GRU）
     try:

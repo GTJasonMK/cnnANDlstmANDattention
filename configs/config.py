@@ -40,7 +40,7 @@ class CNNLayerConfig:
 
 @dataclass
 class CNNConfig:
-    # CNN 变体：standard|depthwise|dilated
+    # CNN 变体：standard|depthwise|dilated|inception
     variant: str = "standard"
     layers: List[CNNLayerConfig] = field(default_factory=lambda: [
         CNNLayerConfig(out_channels=32, kernel_size=5),
@@ -48,6 +48,9 @@ class CNNConfig:
     ])
     dropout: float = 0.1
     use_batchnorm: bool = True
+    # 通道注意力
+    use_channel_attention: bool = False
+    channel_attention_type: str = "eca"  # eca|se
 
 
 @dataclass
@@ -62,14 +65,18 @@ class LSTMConfig:
 @dataclass
 class AttentionConfig:
     enabled: bool = True
-    # 注意力变体：standard|multiscale
+    # 注意力变体：standard|multiscale|local|conformer
     variant: str = "standard"
     num_heads: int = 4
     dropout: float = 0.1
     add_positional_encoding: bool = False
+    positional_mode: str = "none"  # none|absolute|alibi|rope
     # 多尺度注意力的可选参数
     multiscale_scales: Optional[List[int]] = field(default_factory=lambda: [1, 2])
     multiscale_fuse: str = "sum"  # "sum" 或 "concat"
+    # 局部注意力
+    local_window_size: int = 64
+    local_dilation: int = 1
 
 
 @dataclass
@@ -77,7 +84,7 @@ class TCNLayerConfig:
     out_channels: int
     kernel_size: int = 3
     dilation: Optional[int] = None  # 若为 None，将按 1,2,4,... 自动推断
-    activation: str = "relu"       # relu|gelu|silu
+    activation: str = "relu"       # relu|gelu|silu|gated
     use_weightnorm: bool = True
 
 
@@ -100,6 +107,9 @@ class ModelConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     fc_hidden: int = 128
     forecast_horizon: int = 1
+    # 可选归一化与分解
+    normalization: Dict[str, Any] = field(default_factory=lambda: {"revin": {"enabled": False}})
+    decomposition: Dict[str, Any] = field(default_factory=lambda: {"enabled": False, "method": "ma", "kernel": 25, "seasonal_period": 24})
 
 
 @dataclass
@@ -210,9 +220,16 @@ class FullConfig:
             ]
         lstm = map_dataclass(LSTMConfig, model.get("lstm"))
         attention = map_dataclass(AttentionConfig, model.get("attention"))
-        model_cfg = ModelConfig(cnn=cnn, tcn=tcn, lstm=lstm, attention=attention,
-                                fc_hidden=model.get("fc_hidden", 128),
-                                forecast_horizon=model.get("forecast_horizon", 1))
+        model_cfg = ModelConfig(
+            cnn=cnn, tcn=tcn, lstm=lstm, attention=attention,
+            fc_hidden=model.get("fc_hidden", 128),
+            forecast_horizon=model.get("forecast_horizon", 1),
+        )
+        # 传递 normalization/decomposition 原样（默认值在 dataclass 中）
+        if isinstance(model.get("normalization"), dict):
+            model_cfg.normalization = model.get("normalization")
+        if isinstance(model.get("decomposition"), dict):
+            model_cfg.decomposition = model.get("decomposition")
 
         data_cfg = map_dataclass(DataConfig, cfg.get("data"))
         opt_cfg = map_dataclass(OptimizerConfig, cfg.get("train", {}).get("optimizer"))
@@ -374,8 +391,8 @@ def validate_full_config_strict(cfg: 'FullConfig') -> None:
             raise ValueError(f'lstm.{k} 不能为空')
     # Attention
     if m.attention.enabled:
-        if m.attention.variant not in ('standard','multiscale'):
-            raise ValueError('attention.variant 必须为 standard 或 multiscale')
+        if m.attention.variant not in ('standard','multiscale','local','conformer'):
+            raise ValueError('attention.variant 必须为 standard|multiscale|local|conformer')
         if m.attention.num_heads is None or m.attention.dropout is None:
             raise ValueError('attention.num_heads/dropout 不能为空')
         if not hasattr(m.attention, 'add_positional_encoding'):
