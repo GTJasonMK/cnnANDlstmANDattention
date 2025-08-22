@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import math
 import os
+import time
+import json
+import hashlib
 from dataclasses import asdict
 from typing import Dict, Tuple, Optional
 
@@ -135,6 +138,7 @@ class Trainer:
 
     def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None, test_loader: Optional[DataLoader] = None):
         history = {"train_loss": [], "val_loss": [], "test_loss": [], "lr": []}
+        t0 = time.time()
         for epoch in range(1, self.cfg.train.epochs + 1):
             self.model.train()
             running = 0.0
@@ -219,12 +223,38 @@ class Trainer:
                 if export_dir:
                     os.makedirs(export_dir, exist_ok=True)
                     m = self.cfg.model
-                    cnn_var = str(getattr(m.cnn, 'variant', 'standard')).strip().lower()[:1]
-                    rnn_type = str(getattr(m.lstm, 'rnn_type', 'lstm')).strip().lower()[:1]
-                    attn_var = str(getattr(m.attention, 'variant', 'standard')).strip().lower()[:1]
-                    export_name = f"{cnn_var}{rnn_type}{attn_var}.pt"
+                    # Build human-readable slug
+                    cnn_variant = str(getattr(m.cnn, 'variant', 'standard')).strip().lower()
+                    # If TCN enabled, override cnn tag to 'tcn'
+                    try:
+                        tcn_enabled = bool(getattr(getattr(m, 'tcn', None), 'enabled', False))
+                    except Exception:
+                        tcn_enabled = False
+                    if tcn_enabled or cnn_variant == 'tcn':
+                        cnn_tag = 'tcn'
+                    else:
+                        cnn_tag = cnn_variant
+                    rnn_type = str(getattr(m.lstm, 'rnn_type', 'lstm')).strip().lower()
+                    attn_variant = str(getattr(m.attention, 'variant', 'standard')).strip().lower()
+                    pos_mode = str(getattr(m.attention, 'positional_mode', 'none')).strip().lower()
+                    ca_on = bool(getattr(m.cnn, 'use_channel_attention', False))
+                    bi = bool(getattr(m.lstm, 'bidirectional', True))
+                    heads = int(getattr(m.attention, 'num_heads', 4)) if hasattr(m, 'attention') else 0
+                    slug = f"{cnn_tag}-{rnn_type}-{attn_variant}-pos{pos_mode}-ca{'on' if ca_on else 'off'}-{'bi' if bi else 'uni'}-H{heads}"
+                    # Deterministic short hash from model config to avoid collisions
+                    try:
+                        cfg_model_dict = asdict(canonicalize_for_checkpoint(self.cfg)).get('model', {})
+                    except Exception:
+                        cfg_model_dict = {}
+                    hash_src = json.dumps(cfg_model_dict, sort_keys=True, ensure_ascii=False)
+                    sh = hashlib.sha1(hash_src.encode('utf-8')).hexdigest()[:8]
+                    export_name = f"{slug}_{sh}.pt"
                     export_path = os.path.join(export_dir, export_name)
                     torch.save(ckpt, export_path)
+                    try:
+                        print(f"[checkpoint] Exported BEST to {export_path}")
+                    except Exception:
+                        pass
 
             # early stopping
             if self.early_stopper is not None and val_loss is not None:
@@ -247,6 +277,9 @@ class Trainer:
         last_path = os.path.join(self.cfg.train.checkpoints.dir, "model_last.pt")
         torch.save(final_ckpt, last_path)
         print(f"Saved final model to {last_path}")
+        # 训练耗时统计
+        history["train_time_sec"] = float(time.time() - t0)
+        print(f"Training finished in {history['train_time_sec']:.2f} sec")
         return history
 
     def evaluate(self, loader: DataLoader, criterion: Optional[nn.Module] = None) -> float:

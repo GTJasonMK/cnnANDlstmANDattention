@@ -1,120 +1,69 @@
-## Configuration Guide
+# CNN+LSTM+Attention 时间序列预测模型配置指南
 
-This document explains all configuration options available in the project. It reflects the current codebase (configs/config.py and related modules) and marks which options were introduced in optimization phases.
+## 目录
+- [概述](#概述)
+- [模型配置 (Model)](#模型配置-model)
+  - [CNN配置 (CNNConfig)](#cnn配置-cnnconfig)
+  - [TCN配置 (TCNConfig)](#tcn配置-tcnconfig)
+  - [LSTM配置 (LSTMConfig)](#lstm配置-lstmconfig)
+  - [注意力配置 (AttentionConfig)](#注意力配置-attentionconfig)
+  - [归一化配置 (Normalization)](#归一化配置-normalization)
+  - [分解配置 (Decomposition)](#分解配置-decomposition)
+- [数据配置 (Data)](#数据配置-data)
+- [训练配置 (Training)](#训练配置-training)
+- [优化组合推荐](#优化组合推荐)
+- [性能影响与适用场景](#性能影响与适用场景)
 
-- Phase 1: ECA/SE channel attention, positional modes (ALiBi/RoPE), Local Attention, TCN gated activation
-- Phase 2: Inception CNN, Conformer block, RevIN, Trend/Residual decomposition
-- Phase 3: SSM (state-space) backbone (lightweight placeholder implemented)
+## 概述
 
-### Table of Contents
-- Overview and File Formats
-- FullConfig (root)
-  - ModelConfig
-    - CNNConfig
-    - TCNConfig
-    - LSTMConfig
-    - AttentionConfig
-    - Normalization (RevIN)
-    - Decomposition (Trend/Residual)
-    - Other model-level options
-  - DataConfig
-  - TrainingConfig
-    - OptimizerConfig
-    - SchedulerConfig
-    - EarlyStoppingConfig
-    - CheckpointConfig
-  - Global (device/output/visual)
-- Recommended Config Combinations
-- Notes on Performance and Scenarios
-- Examples
+本项目实现了一个多阶段优化的时间序列预测模型，集成了现代深度学习架构的最新进展：
 
----
+- **第一阶段优化**：ECA/SE通道注意力、相对位置编码(ALiBi/RoPE)、局部窗口注意力、TCN门控激活
+- **第二阶段优化**：InceptionTime多核分支、Conformer混合块、趋势-季节分解、RevIN归一化
+- **第三阶段优化**：SSM状态空间模型、Horizon-aware解码头、Feature-as-Token变体
 
-## Overview and File Formats
-- Configs can be YAML (.yaml/.yml) or JSON (.json). The loader chooses by file extension.
-- Root structure corresponds to FullConfig dataclass: { model, data, train, device, output_dir, visual_* }.
-- See sample configs in configs/yaml/*.yaml
+## 模型配置 (Model)
 
----
+### CNN配置 (CNNConfig)
 
-## FullConfig (root)
-Top-level configuration container.
+#### 基础参数
 
-- model: ModelConfig. Default: see each subsection
-- data: DataConfig
-- train: TrainingConfig
-- device: Optional[str] GPU/CPU selection; if null uses auto
-- output_dir: Optional[str] base output dir; if null, defaults per code paths
-- visual_save_dir: str default "image"
-- visual_enabled: bool default true
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `variant` | str | "standard" | standard, depthwise, dilated, inception | CNN架构变体选择 |
+| `dropout` | float | 0.1 | 0.0-1.0 | Dropout概率 |
+| `use_batchnorm` | bool | true | true, false | 是否使用批归一化 |
 
-Example:
-```yaml
-model: { ... }
-data: { ... }
-train: { ... }
-device: null
-output_dir: null
-visual_save_dir: image
-visual_enabled: true
-```
+#### 通道注意力 (第一阶段新增)
 
----
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `use_channel_attention` | bool | false | true, false | 是否启用通道注意力 |
+| `channel_attention_type` | str | "eca" | eca, se | 通道注意力类型 |
 
-## ModelConfig
-Holds all model-related sub-configs and simple scalars.
+#### 层配置 (CNNLayerConfig)
 
-- cnn: CNNConfig
-- tcn: TCNConfig
-- lstm: LSTMConfig
-- attention: AttentionConfig
-- fc_hidden: int, default 128. Hidden size of the prediction head
-- forecast_horizon: int, default 1. Number of future steps to predict
-- normalization: Dict, default { revin: { enabled: false } } (Phase 2)
-- decomposition: Dict, default { enabled: false, method: "ma", kernel: 25, seasonal_period: 24 } (Phase 2)
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `out_channels` | int | 必填 | >0 | 输出通道数 |
+| `kernel_size` | int | 3 | >0 | 卷积核大小 |
+| `stride` | int | 1 | >0 | 步长 |
+| `padding` | int/None | None | >=0 | 填充，None表示same padding |
+| `dilation` | int | 1 | >0 | 膨胀率 |
+| `activation` | str | "relu" | relu, gelu, silu | 激活函数 |
+| `pool` | str/None | "max" | max, avg, None | 池化类型 |
+| `pool_kernel_size` | int | 2 | >0 | 池化核大小 |
+| `dilation_rates` | List[int]/None | None | [1,2,4] | 膨胀卷积的膨胀率列表 |
 
-Example:
-```yaml
-model:
-  fc_hidden: 128
-  forecast_horizon: 3
-  cnn: { ... }
-  lstm: { ... }
-  attention: { ... }
-  normalization: { revin: { enabled: true } }
-  decomposition: { enabled: true, method: ma, kernel: 25 }
-```
+#### Inception变体专用参数 (第二阶段新增)
 
----
+| 参数名 | 类型 | 默认值 | 功能描述 |
+|--------|------|--------|----------|
+| `inception_kernel_sizes` | List[int] | [3,5,7] | Inception分支的卷积核尺寸 |
+| `inception_dilations` | List[int] | [1,2] | Inception分支的膨胀率 |
 
-## CNNConfig
-Convolutional feature extractor settings.
+#### 使用示例
 
-- variant: str, default "standard". Choices: standard|depthwise|dilated|inception (Phase 2)
-  - standard: regular Conv1d blocks
-  - depthwise: depthwise-separable conv blocks
-  - dilated: dilated conv blocks; per-layer "dilation_rates" allowed
-  - inception (Phase 2): multi-branch conv with multiple kernel sizes/dilations
-- layers: List[CNNLayerConfig]
-- dropout: float, default 0.1
-- use_batchnorm: bool, default true
-- use_channel_attention: bool, default false (Phase 1)
-- channel_attention_type: str, default "eca". Choices: eca|se (Phase 1)
-
-CNNLayerConfig (per-layer):
-- out_channels: int (required)
-- kernel_size: int, default 3
-- stride: int, default 1
-- padding: Optional[int], default null => same padding
-- dilation: int, default 1
-- activation: str, default "relu" (e.g., relu|gelu|silu)
-- pool: Optional[str], default "max" (max|avg|null)
-- pool_kernel_size: int, default 2
-- dilation_rates: Optional[List[int]] (used by dilated variant to specify multi-rate block)
-- inception_kernel_sizes: Optional[List[int]] (only when variant=inception)
-- inception_dilations: Optional[List[int]] (only when variant=inception)
-
-Example:
 ```yaml
 model:
   cnn:
@@ -122,262 +71,251 @@ model:
     use_channel_attention: true
     channel_attention_type: eca
     layers:
-      - { out_channels: 64, kernel_size: 3, activation: relu, inception_kernel_sizes: [3,5,7], inception_dilations: [1,2] }
-      - { out_channels: 128, kernel_size: 3, activation: gelu }
+      - out_channels: 64
+        kernel_size: 3
+        activation: relu
+        inception_kernel_sizes: [3,5,7]
+        inception_dilations: [1,2]
 ```
 
----
+### TCN配置 (TCNConfig)
 
-## TCNConfig
-Causal temporal convolution network settings (alternative backbone).
+#### 基础参数
 
-- enabled: bool, default false. If true, TCNFeatureExtractor is used (cnn.variant treated as "tcn")
-- layers: List[TCNLayerConfig]
-- dropout: float, default 0.0
-- use_batchnorm: bool, default true
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `enabled` | bool | false | true, false | 是否启用TCN |
+| `dropout` | float | 0.0 | 0.0-1.0 | Dropout概率 |
+| `use_batchnorm` | bool | true | true, false | 是否使用批归一化 |
 
-TCNLayerConfig:
-- out_channels: int (required)
-- kernel_size: int, default 3
-- dilation: Optional[int], default null (if null, code inflates as 1,2,4,...)
-- activation: str, default "relu". Choices: relu|gelu|silu|gated (Phase 1)
-- use_weightnorm: bool, default true
+#### 层配置 (TCNLayerConfig)
 
-Example:
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `out_channels` | int | 必填 | >0 | 输出通道数 |
+| `kernel_size` | int | 3 | >0 | 卷积核大小 |
+| `dilation` | int/None | None | >0 | 膨胀率，None时自动递增 |
+| `activation` | str | "relu" | relu, gelu, silu, gated | 激活函数 |
+| `use_weightnorm` | bool | true | true, false | 是否使用权重归一化 |
+
+#### 门控激活 (第一阶段新增)
+
+当 `activation: gated` 时，使用门控激活：`y = conv(x) * sigmoid(gate(x))`
+
+#### 使用示例
+
 ```yaml
 model:
-  cnn: { variant: tcn }
+  cnn:
+    variant: tcn
   tcn:
     enabled: true
     layers:
-      - { out_channels: 64, kernel_size: 3, dilation: 1, activation: gated }
-      - { out_channels: 128, kernel_size: 3, dilation: 2, activation: gated }
+      - out_channels: 64
+        kernel_size: 3
+        dilation: 1
+        activation: gated
+      - out_channels: 128
+        kernel_size: 3
+        dilation: 2
+        activation: gated
 ```
 
----
 
-## LSTMConfig
-Recurrent backbone settings; supports LSTM/GRU/SSM.
+### LSTM配置 (LSTMConfig)
 
-- rnn_type: str, default "lstm". Choices: lstm|gru|ssm (Phase 3)
-- hidden_size: int, default 128
-- num_layers: int, default 2
-- bidirectional: bool, default true
-- dropout: float, default 0.1 (applied between RNN layers when num_layers>1)
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `rnn_type` | str | "lstm" | lstm, gru, ssm | RNN类型选择（第三阶段新增：ssm 占位）|
+| `hidden_size` | int | 128 | >0 | 隐状态维度 |
+| `num_layers` | int | 2 | >0 | 堆叠层数 |
+| `bidirectional` | bool | true | true, false | 是否双向 |
+| `dropout` | float | 0.1 | 0.0-1.0 | 层间dropout |
 
-Example:
+示例：
 ```yaml
 model:
   lstm:
-    rnn_type: ssm   # Phase 3 option; lightweight placeholder implemented
-    hidden_size: 128
+    rnn_type: gru
+    hidden_size: 256
     num_layers: 2
-    bidirectional: false
-    dropout: 0.05
+    bidirectional: true
+    dropout: 0.1
 ```
 
----
+### 注意力配置 (AttentionConfig)
 
-## AttentionConfig
-Self-attention block settings.
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `enabled` | bool | true | true, false | 是否启用注意力模块 |
+| `variant` | str | "standard" | standard, multiscale, local, conformer | 注意力变体（第一/二阶段新增：local/conformer）|
+| `num_heads` | int | 4 | >0 | 注意力头数 |
+| `dropout` | float | 0.1 | 0.0-1.0 | 注意力/输出dropout |
+| `add_positional_encoding` | bool | false | true, false | 是否添加绝对位置（正弦） |
+| `positional_mode` | str | "none" | none, absolute, alibi, rope | 位置编码/偏置模式（第一阶段新增：alibi/rope）|
+| `multiscale_scales` | List[int] | [1,2] | 整数列表 | 多尺度注意力的尺度 |
+| `multiscale_fuse` | str | "sum" | sum, concat | 多尺度融合策略 |
+| `local_window_size` | int | 64 | >0 | 局部窗口大小（第一阶段新增）|
+| `local_dilation` | int | 1 | >=1 | 窗口膨胀步长（第一阶段新增）|
 
-- enabled: bool, default true
-- variant: str, default "standard". Choices: standard|multiscale|local|conformer
-  - local (Phase 1): Local window attention with dilation
-  - conformer (Phase 2): uses ConformerBlock stack internally (lightweight)
-- num_heads: int, default 4
-- dropout: float, default 0.1
-- add_positional_encoding: bool, default false (absolute sinusoidal)
-- positional_mode: str, default "none". Choices: none|absolute|alibi|rope (Phase 1)
-- multiscale_scales: Optional[List[int]], default [1,2] (for variant=multiscale)
-- multiscale_fuse: str, default "sum" (sum|concat) (for multiscale)
-- local_window_size: int, default 64 (for variant=local) (Phase 1)
-- local_dilation: int, default 1 (for variant=local) (Phase 1)
-
-Examples:
+示例：
 ```yaml
 model:
   attention:
     enabled: true
     variant: local
     num_heads: 4
+    dropout: 0.1
     positional_mode: rope
     local_window_size: 64
     local_dilation: 2
 ```
-```yaml
-model:
-  attention:
-    enabled: true
-    variant: conformer
-    num_heads: 4
-    dropout: 0.1
-```
 
----
+### 模型通用参数 (ModelConfig)
 
-## Normalization (RevIN) — Phase 2
-Applied around the model input (B,T,D). Reversible normalization.
+| 参数名 | 类型 | 默认值 | 功能描述 |
+|--------|------|--------|----------|
+| `fc_hidden` | int | 128 | 最终MLP头的隐藏维度 |
+| `forecast_horizon` | int | 1 | 预测步长 |
+| `normalization` | dict | {revin: {enabled: false}} | 归一化设置（第二阶段新增：RevIN）|
+| `decomposition` | dict | {enabled: false, method: ma, kernel: 25, seasonal_period: 24} | 趋势-残差分解（第二阶段新增）|
 
-- normalization: Dict
-  - revin.enabled: bool, default false
-
-Example:
+示例（RevIN + 分解）：
 ```yaml
 model:
   normalization:
-    revin: { enabled: true }
-```
-
----
-
-## Decomposition (Trend/Residual) — Phase 2
-Two-branch processing: input is decomposed into residual and trend; both pass through the same backbone and are fused.
-
-- decomposition.enabled: bool, default false
-- decomposition.method: str, default "ma". Choices: ma|ets
-- decomposition.kernel: int, default 25 (for method=ma)
-- decomposition.alpha: float, default 0.3 (for method=ets)
-
-Example:
-```yaml
-model:
+    revin:
+      enabled: true
   decomposition:
     enabled: true
     method: ma
     kernel: 25
 ```
 
----
+## 数据配置 (Data)
 
-## DataConfig
-Dataset and loader settings.
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `data_path` | str/None | None | 路径 | 数据文件路径（CSV/NPZ/NPY）|
+| `sequence_length` | int | 64 | >0 | 输入序列长度 |
+| `horizon` | int | 1 | >0 | 预测步长（与 model.forecast_horizon 对齐）|
+| `feature_indices` | List[int]/None | None | 列索引 | 选择使用的特征列索引 |
+| `target_indices` | List[int]/None | None | 列索引 | 目标列索引（默认最后一列）|
+| `train_split` | float | 0.7 | (0,1) | 训练集占比 |
+| `val_split` | float | 0.15 | (0,1) | 验证集占比 |
+| `normalize` | str | "standard" | standard, minmax, none | 数据预处理标准化类型 |
+| `batch_size` | int | 64 | >0 | 批大小 |
+| `num_workers` | int | 0 | >=0 | DataLoader 并行度 |
+| `shuffle_train` | bool | true | true, false | 训练集是否打乱 |
+| `drop_last` | bool | false | true, false | 不满批是否丢弃 |
 
-- data_path: Optional[str], default null. Path to CSV/NPZ/NPY/NPZ
-- sequence_length: int, default 64
-- horizon: int, default 1
-- feature_indices: Optional[List[int]], default null
-- target_indices: Optional[List[int]], default null
-- train_split: float, default 0.7
-- val_split: float, default 0.15
-- normalize: str, default "standard". Choices: standard|minmax|none (data-level normalization)
-- batch_size: int, default 64
-- num_workers: int, default 0
-- shuffle_train: bool, default true
-- drop_last: bool, default false
-
-Example:
+示例：
 ```yaml
 data:
-  data_path: data/simulated.csv
-  sequence_length: 96
-  horizon: 6
-  normalize: standard
+  data_path: data/my_dataset.csv
+  sequence_length: 128
+  horizon: 12
+  normalize: minmax
   batch_size: 128
   num_workers: 4
 ```
 
----
-
-## TrainingConfig
-Training loop and optimization settings.
-
-- epochs: int, default 50
-- loss: str, default "mse". Choices: mse|mae|huber
-- optimizer: OptimizerConfig
-- scheduler: SchedulerConfig
-- early_stopping: EarlyStoppingConfig
-- checkpoints: CheckpointConfig
-- gradient_clip: Optional[float], default 1.0
-- mixed_precision: bool, default false
-- log_dir: str, default "runs"
-- seed: int, default 42
-- print_every: int, default 50
-- deterministic: Optional[bool], default null
-- cudnn_benchmark: Optional[bool], default null
-- matmul_precision: Optional[str], default null (e.g., "high", "medium")
+## 训练配置 (Training)
 
 ### OptimizerConfig
-- name: str, default "adam". Choices: adam|sgd|adamw
-- lr: float, default 1e-3
-- weight_decay: float, default 1e-4
-- momentum: float, default 0.9 (SGD)
-- betas: Optional[List[float]] (Adam/AdamW)
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `name` | str | "adam" | adam, sgd, adamw | 优化器类型 |
+| `lr` | float | 1e-3 | >0 | 学习率 |
+| `weight_decay` | float | 1e-4 | >=0 | 权重衰减 |
+| `momentum` | float | 0.9 | >=0 | 仅SGD使用 |
+| `betas` | List[float]/None | None | [beta1, beta2] | Adam/AdamW 超参 |
 
 ### SchedulerConfig
-- name: Optional[str], default "cosine". Choices: cosine|step|plateau|null
-- step_size: int, default 10 (step)
-- gamma: float, default 0.5 (step)
-- T_max: int, default 50 (cosine)
-- reduce_on_plateau_mode: str, default "min"
-- reduce_on_plateau_patience: int, default 5
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `name` | str/None | "cosine" | cosine, step, plateau, None | 学习率调度策略 |
+| `step_size` | int | 10 | >0 | StepLR 步长 |
+| `gamma` | float | 0.5 | (0,1) | 衰减因子 |
+| `T_max` | int | 50 | >0 | CosineAnnealingLR 的 T_max |
+| `reduce_on_plateau_mode` | str | "min" | min, max | Plateau 监控模式 |
+| `reduce_on_plateau_patience` | int | 5 | >=0 | Plateau 耐心值 |
 
 ### EarlyStoppingConfig
-- enabled: bool, default true
-- patience: int, default 10
-- min_delta: float, default 0.0
+| 参数名 | 类型 | 默认值 | 可选值 | 功能描述 |
+|--------|------|--------|--------|----------|
+| `enabled` | bool | true | true, false | 是否启用早停 |
+| `patience` | int | 10 | >=0 | 训练轮耐心值 |
+| `min_delta` | float | 0.0 | >=0 | 指标最小改善幅度阈值 |
+
+### TrainingConfig
+| 参数名 | 类型 | 默认值 | 功能描述 |
+|--------|------|--------|----------|
+| `epochs` | int | 50 | 训练轮数 |
+| `loss` | str | "mse" | 损失函数类型（mse, mae, huber）|
+| `optimizer` | OptimizerConfig | - | 优化器配置 |
+| `scheduler` | SchedulerConfig | - | 学习率调度配置 |
+| `early_stopping` | EarlyStoppingConfig | - | 早停配置 |
+| `checkpoints` | CheckpointConfig | - | 模型保存配置 |
+| `gradient_clip` | float/None | 1.0 | 梯度裁剪阈值（None禁用）|
+| `mixed_precision` | bool | false | 是否启用混合精度 |
+| `log_dir` | str | "runs" | TensorBoard日志目录 |
+| `seed` | int | 42 | 随机种子 |
+| `print_every` | int | 50 | 训练过程中打印间隔 |
+| `deterministic` | bool/None | None | cudnn 确定性开关（None表示遵循PyTorch默认）|
+| `cudnn_benchmark` | bool/None | None | cudnn benchmark 开关 |
+| `matmul_precision` | str/None | None | 矩阵乘精度（"high","medium"）|
 
 ### CheckpointConfig
-- dir: str, default "checkpoints"
-- save_best_only: bool, default true
-- monitor: str, default "val_loss"
-- export_best_dir: Optional[str], default null
+| 参数名 | 类型 | 默认值 | 功能描述 |
+|--------|------|--------|----------|
+| `dir` | str | "checkpoints" | 模型保存目录 |
+| `save_best_only` | bool | true | 仅保存最佳模型 |
+| `monitor` | str | "val_loss" | 监控指标 |
+| `export_best_dir` | str/None | None | 另存最佳模型目录（可选）|
 
-Examples:
-```yaml
-train:
-  epochs: 20
-  optimizer: { name: adamw, lr: 0.0005, weight_decay: 0.01 }
-  scheduler: { name: cosine, T_max: 20 }
-  early_stopping: { enabled: true, patience: 5 }
-  checkpoints: { dir: checkpoints, save_best_only: true }
-  gradient_clip: 1.0
-```
+## 优化组合推荐
 
----
+- 长序列（T≥1024）：
+  - attention.variant: local
+  - attention.positional_mode: rope 或 alibi
+  - cnn.variant: dilated 或 inception
+  - tcn.layers.*.activation: gated（若用TCN骨干）
+  - 可启用 normalization.revin.enabled: true
 
-## Global (device / output / visual)
-- device: null|"cpu"|"cuda"|"cuda:0" etc. If null, auto-selects
-- output_dir: Optional base output directory (if used by scripts)
-- visual_save_dir: str, default "image" (used by visualization helpers)
-- visual_enabled: bool, default true
+- 多变量强相关：
+  - cnn.use_channel_attention: true（eca 优先）
+  - attention.variant: local 或 conformer
+  - positional_mode: rope
 
----
+- 强趋势/季节性：
+  - decomposition.enabled: true（method: ma 或 ets）
+  - normalization.revin.enabled: true
 
-## Recommended Config Combinations
-- ECA + RoPE + Local (Phase 1): configs/yaml/eca_rope_local.yaml
-- Inception + ALiBi (Phase 2): configs/yaml/inception_alibi.yaml
-- RevIN + Decomposition + Local (Phase 2 + Phase 1): configs/yaml/revin_decomp_local.yaml
-- Conformer + RevIN (Phase 2): configs/yaml/conformer_revin.yaml
-- TCN with Gated activation (Phase 1): configs/yaml/tcn_gated.yaml
-- SSM + Local (Phase 3 + Phase 1): configs/yaml/ssm_local.yaml
+- 多步长预测（大 horizon）：
+  - 可后续切换到更强的解码头（第三阶段计划），当前建议 fc_hidden 适当增大
 
-Tips:
-- For long sequences: local attention with dilation, TCN gated, RoPE/ALiBi
-- For multi-scale patterns: inception CNN or dilated CNN; multiscale attention
-- For non-stationary data: enable RevIN and decomposition (ma/ets)
-- For strong variable correlation: enable channel attention and consider local attention
+## 性能影响与适用场景
 
----
-
-## Notes on Performance and Scenarios
-- Channel Attention (ECA/SE): small overhead; typical +1–3% accuracy gains
-- Local Attention: reduces O(T^2) to approx O(T·W); set window_size 32–128
-- RoPE/ALiBi: improves long-range generalization; minimal overhead
-- TCN Gated: improves nonlinearity, stable gradients on non-stationary data
-- Inception CNN: stronger multi-scale capture; moderate compute increase
-- Conformer: better short/long-term balance; moderate increase in params/latency
-- RevIN: improves robustness to distribution shift; negligible overhead
-- Decomposition: stabilizes trends/seasons; small conv cost (MA) or linear ETS loop
-- SSM (placeholder): efficient long-sequence modeling; replaceable with advanced SSM libs later
+- ECA/SE 通道注意力（第一阶段）：
+  - 额外开销极小（ECA 更轻），一般带来 1–3% 误差改善
+- RoPE/ALiBi（第一阶段）：
+  - 几乎不增加参数；长序列与外推稳健性更佳
+- 局部窗口注意力（第一阶段）：
+  - 将 O(T^2) 降低为 O(T·W)，适合长序列；窗口太小可能丢失极远依赖
+- TCN gated（第一阶段）：
+  - 轻微增加计算，非平稳数据更稳；对复杂序列有效
+- Inception CNN（第二阶段）：
+  - 增加分支并发，参数/计算增加；多尺度/多周期数据收益明显
+- Conformer（第二阶段）：
+  - 引入 MHSA+DWConv 混合，表达力强；计算开销中等
+- RevIN（第二阶段）：
+  - 几乎无额外参数；跨域/季节性变化时显著改善
+- 趋势分解（第二阶段）：
+  - 少量额外算子；对趋势明显数据提升泛化
+- SSM（第三阶段）：
+  - 目标是替代 RNN 提升长序列效率与精度；需要选择成熟实现（当前为占位）
 
 ---
 
-## Examples
-Run with config:
-```bash
-python main.py --config configs/yaml/eca_rope_local.yaml
-```
-
-Adjust sub-sections above to compose your own configuration. Keep defaults for backward compatibility if unsure.
-
+备注：第三阶段的“解码头（Horizon-aware）”与“Feature-as-Token 变体”尚未集成到主干配置中，等需求明确后可在本指南中追加对应章节与参数说明。

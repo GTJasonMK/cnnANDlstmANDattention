@@ -384,8 +384,8 @@ def validate_full_config_strict(cfg: 'FullConfig') -> None:
                 if not getattr(l, 'dilation_rates', None):
                     raise ValueError(f'dilated CNN 第{i}层缺少 dilation_rates')
     # RNN
-    if m.lstm.rnn_type not in ('lstm','gru'):
-        raise ValueError('lstm.rnn_type 必须为 lstm 或 gru')
+    if m.lstm.rnn_type not in ('lstm','gru','ssm'):
+        raise ValueError('lstm.rnn_type 必须为 lstm、gru 或 ssm')
     for k in ['hidden_size','num_layers','bidirectional','dropout']:
         if getattr(m.lstm, k, None) is None:
             raise ValueError(f'lstm.{k} 不能为空')

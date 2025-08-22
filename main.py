@@ -51,18 +51,46 @@ def setup_env(cfg):
     except Exception:
         pass
 
+    # 路径解析工具：仅当目标是相对路径时，才在 output_dir 下拼接；绝对路径保持不变；
+    # 若目标已在 output_dir 之下，也保持不变，避免重复嵌套。
+    def _resolve_path(base_out: str | None, desired: str | None, default_subdir: str) -> str:
+        d = desired
+        if not d:
+            if base_out:
+                return os.path.join(base_out, default_subdir)
+            return default_subdir
+        # 绝对路径直接返回
+        if os.path.isabs(d):
+            return d
+        # 相对路径：如果设置了 base_out
+        if base_out:
+            abs_d = os.path.abspath(d)
+            abs_base = os.path.abspath(base_out)
+            try:
+                common = os.path.commonpath([abs_d, abs_base])
+            except Exception:
+                common = ''
+            # 若目标已经位于 base_out 之下，则保持不变；否则拼接 base_out
+            if common == abs_base:
+                return d
+            return os.path.join(base_out, d)
+        # 无 base_out 时，返回相对路径本身
+        return d
+
     # 统一输出目录：output_dir > visual_save_dir/train.checkpoints.dir/train.log_dir
     base_out = getattr(cfg, 'output_dir', None)
     if base_out:
         os.makedirs(base_out, exist_ok=True)
-        # image dir
-        cfg.visual_save_dir = os.path.join(base_out, cfg.visual_save_dir or 'image')
-        # checkpoints dir
-        ckpt_dir = getattr(cfg.train.checkpoints, 'dir', 'checkpoints')
-        cfg.train.checkpoints.dir = os.path.join(base_out, ckpt_dir)
-        # tensorboard dir
-        log_dir = getattr(cfg.train, 'log_dir', 'runs')
-        cfg.train.log_dir = os.path.join(base_out, log_dir)
+
+    # image dir
+    cfg.visual_save_dir = _resolve_path(base_out, getattr(cfg, 'visual_save_dir', None), 'image')
+    # checkpoints dir
+    ckpt_dir_cur = getattr(cfg.train.checkpoints, 'dir', None)
+    cfg.train.checkpoints.dir = _resolve_path(base_out, ckpt_dir_cur, 'checkpoints')
+    # tensorboard dir
+    log_dir_cur = getattr(cfg.train, 'log_dir', None)
+    cfg.train.log_dir = _resolve_path(base_out, log_dir_cur, 'runs')
+
     # 创建最终目录
     os.makedirs(cfg.visual_save_dir, exist_ok=True)
     os.makedirs(cfg.train.checkpoints.dir, exist_ok=True)
@@ -177,7 +205,10 @@ def run(cfg, resume_path: Optional[str] = None):
     # 预测与指标
     preds, targets = trainer.predict(test_loader)
     metrics = evaluate_model(model, test_loader, trainer.device)
-    print({k: round(v, 6) for k, v in metrics.items()})
+    # 将训练耗时加入指标字典，便于搜索器解析
+    if isinstance(history, dict) and 'train_time_sec' in history:
+        metrics['train_time_sec'] = float(history['train_time_sec'])
+    print({k: round(v, 6) if isinstance(v, (int, float)) else v for k, v in metrics.items()})
 
     if getattr(cfg, 'visual_enabled', True):
         plot_predictions(preds, targets)
