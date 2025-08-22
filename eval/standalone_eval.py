@@ -634,11 +634,65 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
     stats = fit_stats(arr, norm)
     arr_norm = apply_normalize(arr, stats, norm)
 
+    # Optional: Wavelet transform (align with training)
+    def _maybe_get(dct, *keys, default=None):
+        cur = dct
+        try:
+            for k in keys:
+                if cur is None:
+                    return default
+                if isinstance(cur, dict):
+                    cur = cur.get(k)
+                else:
+                    return default
+            return cur if cur is not None else default
+        except Exception:
+            return default
+
+    wave_cfg = _maybe_get(data_cfg, 'wavelet', default=None)
+    if wave_cfg is None:
+        wave_cfg = _maybe_get(cfg_dict, 'data', 'wavelet', default=None)
+    _wv_enabled = False
+    try:
+        _wv_enabled = bool(_maybe_get(wave_cfg or {}, 'enabled', default=False))
+    except Exception:
+        _wv_enabled = False
+
+    if _wv_enabled:
+        try:
+            import pywt  # type: ignore
+            wavelet = str(_maybe_get(wave_cfg, 'wavelet', default='db4'))
+            level = int(_maybe_get(wave_cfg, 'level', default=3))
+            mode = str(_maybe_get(wave_cfg, 'mode', default='symmetric'))
+            take = str(_maybe_get(wave_cfg, 'take', default='all')).lower()
+            N, F = arr_norm.shape
+            outs = []
+            for f in range(F):
+                xcol = arr_norm[:, f]
+                coeffs = pywt.wavedec(xcol, wavelet=wavelet, level=level, mode=mode)
+                if take == 'approx':
+                    sel = [coeffs[0]]
+                elif take == 'details':
+                    sel = coeffs[1:]
+                else:
+                    sel = coeffs
+                parts = []
+                for c in sel:
+                    xi = np.linspace(0, len(c) - 1, num=len(c))
+                    xN = np.linspace(0, len(c) - 1, num=N)
+                    parts.append(np.interp(xN, xi, c))
+                band = np.stack(parts, axis=1)
+                outs.append(band)
+            arr_norm = np.concatenate(outs, axis=1).astype(np.float32)
+            _dlog(f"wavelet enabled -> features expanded to {arr_norm.shape[1]}")
+        except Exception as e:
+            _dlog(f"[WARN] wavelet requested but failed: {e}")
+
     # Windowize
     _dlog(f"feature_idx={feat_idx} target_idx={targ_idx}")
     X_np, Y_np = windowize(arr_norm, seq_len, hz,
-                           feat_idx if feat_idx is not None else list(range(arr.shape[1])),
-                           targ_idx if targ_idx is not None else [arr.shape[1]-1])
+                           feat_idx if feat_idx is not None else list(range(arr_norm.shape[1])),
+                           targ_idx if targ_idx is not None else [arr_norm.shape[1]-1])
     _dlog(f"windowized X={X_np.shape} Y={Y_np.shape}")
 
     # 读取期望的 IO 形状（从权重中推断），与数据/配置进行严格对齐
@@ -647,11 +701,14 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
     exp_out_dim = None
     if isinstance(state, dict):
         # 推断输入通道：寻找第一个 conv1d 权重（形状为 [out_c, in_c, k]）
+        # 兼容 depthwise 可分离卷积：其 depthwise 权重形状为 [in_c, 1, k]，不能直接用 shape[1]
+        # 因此扫描所有卷积权重，取 shape[1] 的最大值作为推断的输入通道数
         for k, v in state.items():
             try:
-                if isinstance(v, torch.Tensor) and v.ndim == 3 and k.startswith("cnn") and k.endswith(".weight"):
-                    exp_in_channels = int(v.shape[1])
-                    break
+                if isinstance(v, torch.Tensor) and v.ndim == 3 and k.endswith(".weight"):
+                    c_in = int(v.shape[1])
+                    if exp_in_channels is None or c_in > exp_in_channels:
+                        exp_in_channels = c_in
             except Exception:
                 continue
         # 推断输出维度：寻找 head.*.weight 的二维矩阵，取“最后一层 head 的 out_features”
@@ -683,9 +740,22 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
     # 严格校验：数据特征数与训练时一致；输出维度与 horizon*n_targets 一致
     if _strict_mode():
         if exp_in_channels is not None and input_size != exp_in_channels:
-            raise RuntimeError(
-                f"输入特征数与训练时不一致: now={input_size}, expected={exp_in_channels}. "
-                f"请使用与训练相同的特征列（或设置相同的 feature_indices），并确保数据预处理一致。")
+            # 可选：自动对齐输入特征数（仅在特征多于训练且未显式提供 feature_indices 时）
+            if (
+                input_size > exp_in_channels and
+                feature_indices is None and
+                os.environ.get('EVAL_AUTO_ALIGN_INPUT', '').lower() in ('1','true','yes','on')
+            ):
+                _dlog(f"auto-align input features: take first {exp_in_channels} of {input_size}")
+                feat_idx = list(range(int(exp_in_channels)))
+                X_np, Y_np = windowize(arr_norm, seq_len, hz,
+                                       feat_idx,
+                                       targ_idx if targ_idx is not None else [arr_norm.shape[1]-1])
+                input_size = int(X_np.shape[2])
+            if exp_in_channels is not None and input_size != exp_in_channels:
+                raise RuntimeError(
+                    f"输入特征数与训练时不一致: now={input_size}, expected={exp_in_channels}. "
+                    f"请使用与训练相同的特征列（或设置相同的 feature_indices），并确保数据预处理一致。")
         hz_check = _as_int(horizon, None) or _as_int(cfg_dict.get("model", {}).get("forecast_horizon"), None)
         if exp_out_dim is not None and hz_check is not None:
             expected_targets = exp_out_dim // int(hz_check) if exp_out_dim % int(hz_check) == 0 else None

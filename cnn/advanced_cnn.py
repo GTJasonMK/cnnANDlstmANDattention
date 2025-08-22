@@ -200,6 +200,22 @@ class AdvancedCNNFeatureExtractor(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor (batch, seq_len, features)
+        Returns:
+            Tensor (batch, seq_len, out_channels)
+        """
+        if x.dim() != 3:
+            raise ValueError(f"Expected 3D input (B, T, F), got shape {tuple(x.shape)}")
+        # Convert to (B, C, T) for conv1d
+        x = x.transpose(1, 2)
+        y = self.net(x)
+        # Convert back to (B, T, C)
+        y = y.transpose(1, 2)
+        return y
+
     def _build_depthwise_block(self, in_c: int, out_c: int, k: int, s: int,
                               activation: str, cfg: dict) -> nn.Module:
         block = []

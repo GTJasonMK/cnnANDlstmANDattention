@@ -230,22 +230,68 @@ def plot_prediction_interval(mean: np.ndarray, lower: np.ndarray, upper: np.ndar
 # 模型解释性可视化
 # ----------------------------
 
-def plot_attention_multihead(attn_weights: torch.Tensor, max_batches: int = 2,
+def plot_attention_multihead(attn_weights, max_batches: int = 2,
                              save: bool = True, filename_prefix: str = "attn_head_"):
-    """分别显示多头注意力权重。
-    Args:
-        attn_weights: (B, H, T, T)
+    """显示多头注意力权重。
+    支持：
+      - 时序注意力 (B,H,T,T) 或 (B,T,T)；
+      - 时空注意力返回的二元组 (w_t, w_f)，其中：
+        w_t: (B,H,T,T) 或 (B,T,T)，时间维注意力
+        w_f: (B,H,F,F) 或 (B,T,F,F) 或 (B,F,F)，特征维注意力
     """
-    if attn_weights is None: return
-    w = attn_weights.detach().cpu().numpy()
-    B, H, T, _ = w.shape
-    for b in range(min(B, max_batches)):
-        for h in range(H):
-            plt.figure(figsize=(5, 4))
-            plt.imshow(w[b, h], aspect='auto', origin='lower', cmap='viridis')
-            plt.colorbar(); plt.xlabel("Key Time"); plt.ylabel("Query Time")
-            plt.title(f"Attention b{b} h{h}"); plt.tight_layout()
-            if save: _savefig(f"{filename_prefix}b{b}_h{h}.png")
+    if attn_weights is None:
+        return
+
+    def _plot_time(wt):
+        if wt is None: return
+        if hasattr(wt, 'detach'):
+            wt = wt.detach().cpu().numpy()
+        wt = np.asarray(wt)
+        if wt.ndim == 3:  # (B,T,T) -> add head=1
+            wt = wt[:, None, ...]
+        B, H, T, _ = wt.shape
+        for b in range(min(B, max_batches)):
+            for h in range(H):
+                plt.figure(figsize=(5, 4))
+                plt.imshow(wt[b, h], aspect='auto', origin='lower', cmap='viridis')
+                plt.colorbar(); plt.xlabel("Key Time"); plt.ylabel("Query Time")
+                plt.title(f"Temporal Attention b{b} h{h}"); plt.tight_layout()
+                if save: _savefig(f"{filename_prefix}temporal_b{b}_h{h}.png")
+
+    def _plot_feature(wf):
+        if wf is None: return
+        if hasattr(wf, 'detach'):
+            wf = wf.detach().cpu().numpy()
+        wf = np.asarray(wf)
+        # 可能形状：(B,H,F,F) / (B,T,F,F) / (B,F,F)
+        if wf.ndim == 4 and wf.shape[1] != wf.shape[2]:
+            # (B,T,F,F) -> 按时间平均到 (B,F,F)
+            wf = wf.mean(axis=1)
+        if wf.ndim == 3:  # (B,F,F)
+            B = wf.shape[0]
+            for b in range(min(B, max_batches)):
+                plt.figure(figsize=(5, 4))
+                plt.imshow(wf[b], aspect='auto', origin='lower', cmap='magma')
+                plt.colorbar(); plt.xlabel("Key Feature"); plt.ylabel("Query Feature")
+                plt.title(f"Spatial Attention b{b}"); plt.tight_layout()
+                if save: _savefig(f"{filename_prefix}spatial_b{b}.png")
+        elif wf.ndim == 4:  # (B,H,F,F)
+            B, H = wf.shape[:2]
+            for b in range(min(B, max_batches)):
+                for h in range(H):
+                    plt.figure(figsize=(5, 4))
+                    plt.imshow(wf[b, h], aspect='auto', origin='lower', cmap='magma')
+                    plt.colorbar(); plt.xlabel("Key Feature"); plt.ylabel("Query Feature")
+                    plt.title(f"Spatial Attention b{b} h{h}"); plt.tight_layout()
+                    if save: _savefig(f"{filename_prefix}spatial_b{b}_h{h}.png")
+
+    # 分派
+    if isinstance(attn_weights, (tuple, list)) and len(attn_weights) == 2:
+        w_t, w_f = attn_weights
+        _plot_time(w_t)
+        _plot_feature(w_f)
+    else:
+        _plot_time(attn_weights)
 
 
 def plot_lstm_hidden_heatmap(hidden_seq: torch.Tensor, save: bool = True,

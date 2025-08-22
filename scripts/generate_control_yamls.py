@@ -59,6 +59,13 @@ TEMPLATE: Dict[str, Any] = {
         'num_workers': 0,
         'shuffle_train': True,
         'drop_last': False,
+        'wavelet': {
+            'enabled': False,
+            'wavelet': 'db4',
+            'level': 3,
+            'mode': 'symmetric',
+            'take': 'all',
+        },
     },
     'train': {
         'epochs': 12,
@@ -117,11 +124,13 @@ def main():
     ap.add_argument('--epochs', type=int, default=12, help='Train epochs to write into each YAML (also set scheduler.T_max if cosine)')
     # baseline
     ap.add_argument('--baseline-cnn', default='standard', choices=['standard','depthwise','dilated','inception','tcn'])
-    ap.add_argument('--baseline-attn', default='standard', choices=['standard','multiscale','local','conformer'])
+    ap.add_argument('--baseline-attn', default='standard', choices=['standard','multiscale','local','conformer','spatiotemporal'])
     ap.add_argument('--baseline-rnn', default='lstm', choices=['lstm','gru','ssm'])
     ap.add_argument('--baseline-ca', action='store_true', help='Use channel attention (ECA) in baseline')
-    # positional sweep control
-    ap.add_argument('--include-positional', action='store_true', help='Include positional sweep (alibi/rope) for factor=pos')
+    # positional & wavelet sweep control
+    ap.add_argument('--include-positional', action='store_true', help='Include positional sweep (absolute/alibi/rope) for factor=pos')
+    ap.add_argument('--include-wavelet', action='store_true', help='Include wavelet sweeps (on with different bases)')
+    ap.add_argument('--wavelet-bases', default='db4,sym5,coif3', help='Comma-separated wavelet bases to test when include-wavelet is set')
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -135,42 +144,46 @@ def main():
         'ca': bool(args.baseline_ca),
     }
     rnn_types = ['lstm', 'gru', 'ssm']
-    attn_variants = ['standard', 'multiscale', 'local', 'conformer']
+    attn_variants = ['standard', 'multiscale', 'local', 'conformer', 'spatiotemporal']
     cnn_variants = ['standard', 'depthwise', 'dilated', 'inception', 'tcn']
-    pos_modes = ['none', 'alibi', 'rope'] if args.include_positional else ['none']
+    pos_modes = ['none', 'absolute', 'alibi', 'rope'] if args.include_positional else ['none']
 
-    def save_cfg(cfg: Dict[str, Any], name: str):
-        stem = Path(name).stem
-        # unique export dir per yaml
+    def save_cfg(cfg: Dict[str, Any], name: str, note: str = ""):
+        # 统一最优模型导出目录，添加说明
         cfg['train'].setdefault('checkpoints', {})
         cfg['train']['checkpoints']['save_best_only'] = True
         cfg['train']['checkpoints']['export_best_dir'] = str(export_root)
+        if note:
+            cfg['notes'] = note
         write_yaml(cfg, out_dir / name)
 
     # 1) baseline
     cfg_base = build_base(baseline, args.data_path, export_root, args.epochs)
-    save_cfg(cfg_base, f"ctrl_baseline__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml")
+    save_cfg(cfg_base, f"ctrl_baseline__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note="Baseline configuration for all sweeps")
 
     # 2) RNN sweep
     for r in rnn_types:
         if r == baseline['rnn']:
             continue
         cfg = build_base({**baseline, 'rnn': r}, args.data_path, export_root, args.epochs)
-        save_cfg(cfg, f"ctrl_rnn-{r}__{baseline['cnn']}-{baseline['attn']}-{r}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml")
+        save_cfg(cfg, f"ctrl_rnn-{r}__{baseline['cnn']}-{baseline['attn']}-{r}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note=f"Control variable: RNN={r}")
 
     # 3) Attention sweep
     for a in attn_variants:
         if a == baseline['attn']:
             continue
         cfg = build_base({**baseline, 'attn': a}, args.data_path, export_root, args.epochs)
-        save_cfg(cfg, f"ctrl_attn-{a}__{baseline['cnn']}-{a}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml")
+        if a == 'spatiotemporal':
+            cfg['model']['attention']['st_mode'] = 'serial'
+            cfg['model']['attention']['st_fuse'] = 'sum'
+        save_cfg(cfg, f"ctrl_attn-{a}__{baseline['cnn']}-{a}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note=f"Control variable: Attention={a}")
 
-    # 4) CNN sweep
+    # 4) CNN/TCN backbone sweep
     for c in cnn_variants:
         if c == baseline['cnn']:
             continue
         cfg = build_base({**baseline, 'cnn': c}, args.data_path, export_root, args.epochs)
-        save_cfg(cfg, f"ctrl_cnn-{c}__{c}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml")
+        save_cfg(cfg, f"ctrl_cnn-{c}__{c}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note=f"Control variable: CNN/TCN={c}")
 
     # 5) Positional sweep (only if include_positional)
     if args.include_positional:
@@ -178,12 +191,12 @@ def main():
             if p == baseline['pos']:
                 continue
             cfg = build_base({**baseline, 'pos': p}, args.data_path, export_root, args.epochs)
-            save_cfg(cfg, f"ctrl_pos-{p}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{p}-ca{'on' if baseline['ca'] else 'off'}.yaml")
+            save_cfg(cfg, f"ctrl_pos-{p}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{p}-ca{'on' if baseline['ca'] else 'off'}.yaml", note=f"Control variable: PositionEncoding={p}")
 
     # 6) Channel attention sweep (flip on/off)
     flipped_ca = not baseline['ca']
     cfg = build_base({**baseline, 'ca': flipped_ca}, args.data_path, export_root, args.epochs)
-    save_cfg(cfg, f"ctrl_ca-{'on' if flipped_ca else 'off'}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if flipped_ca else 'off'}.yaml")
+    save_cfg(cfg, f"ctrl_ca-{'on' if flipped_ca else 'off'}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if flipped_ca else 'off'}.yaml", note=f"Control variable: ChannelAttention={'on' if flipped_ca else 'off'}")
 
     print(f"Generated control-variable YAMLs into {out_dir}")
 

@@ -1,0 +1,16 @@
+cnn,rnn,attn,pos,ca,wavelet_on,wavelet_base,mse,checkpoint
+standard,lstm,conformer,none,off,False,none,0.147023931145668,./best_model/standard-lstm-conformer-posnone-caoff-bi-H4_c3fd06e3.pt
+tcn,lstm,standard,none,off,False,none,0.1586869657039642,./best_model/tcn-lstm-standard-posnone-caoff-bi-H4_b38788de.pt
+depthwise,lstm,standard,none,off,False,none,0.1662568897008896,./best_model/depthwise-lstm-standard-posnone-caoff-bi-H4_90deee5d.pt
+standard,lstm,multiscale,none,off,False,none,0.1680414378643036,./best_model/standard-lstm-multiscale-posnone-caoff-bi-H4_2d937ccc.pt
+inception,lstm,standard,none,off,False,none,0.1707909256219864,./best_model/inception-lstm-standard-posnone-caoff-bi-H4_6f03e296.pt
+standard,gru,standard,none,off,False,none,0.1714601516723632,./best_model/standard-gru-standard-posnone-caoff-bi-H4_e86b5c44.pt
+standard,lstm,standard,none,off,False,none,0.1714601516723632,./best_model/standard-lstm-standard-posnone-caoff-bi-H4_539bf738.pt
+standard,lstm,standard,none,on,False,none,0.1714601516723632,./best_model/standard-lstm-standard-posnone-caon-bi-H4_cf75cc19.pt
+standard,ssm,standard,none,off,False,none,0.1714601516723632,./best_model/standard-ssm-standard-posnone-caoff-bi-H4_cc3dff73.pt
+standard,lstm,spatiotemporal,none,off,False,none,0.1725049912929535,./best_model/standard-lstm-spatiotemporal-posnone-caoff-bi-H4_750c6d36.pt
+standard,lstm,local,none,off,False,none,0.1764532923698425,./best_model/standard-lstm-local-posnone-caoff-bi-H4_f03fedcc.pt
+dilated,lstm,standard,none,off,False,none,0.1891916394233703,./best_model/dilated-lstm-standard-posnone-caoff-bi-H4_79ad0c0e.pt
+standard,lstm,standard,absolute,off,False,none,0.2914451956748962,./best_model/standard-lstm-standard-posabsolute-caoff-bi-H4_ae74b7b2.pt
+standard,lstm,standard,rope,off,False,none,0.3664253056049347,./best_model/standard-lstm-standard-posrope-caoff-bi-H4_159f3970.pt
+standard,lstm,standard,alibi,off,False,none,0.5059516429901123,./best_model/standard-lstm-standard-posalibi-caoff-bi-H4_ad34916c.pt

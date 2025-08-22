@@ -119,8 +119,17 @@ class CNNLSTMAttentionModel(nn.Module):
             rnn_cls = SSMProcessor
         else:
             rnn_cls = LSTMProcessor
+        # 计算实际 CNN 输出维度（更稳健）：通过一次小样本前向推断确定维度
+        try:
+            with torch.no_grad():
+                _probe = torch.zeros(1, 8, num_features)
+                _cnn_out = self.cnn(_probe)
+                cnn_out_dim = int(_cnn_out.size(-1))
+        except Exception:
+            # 回退到静态属性
+            cnn_out_dim = int(getattr(self.cnn, 'out_channels', num_features))
         self.rnn = rnn_cls(
-            input_size=self.cnn.out_channels,
+            input_size=cnn_out_dim,
             hidden_size=lstm_hidden,
             num_layers=lstm_layers,
             bidirectional=bidirectional,
