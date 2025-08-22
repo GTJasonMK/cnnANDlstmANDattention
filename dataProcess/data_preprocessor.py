@@ -7,6 +7,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 
+try:
+    import pywt  # type: ignore
+    _HAS_PYWT = True
+except Exception:
+    _HAS_PYWT = False
+
 
 @dataclass
 class NormalizationStats:
@@ -33,6 +39,7 @@ class TimeSeriesDataset(Dataset):
         target_indices: Optional[List[int]] = None,
         normalize: str = "standard",
         stats: Optional[NormalizationStats] = None,
+        wavelet_cfg: Optional[dict] = None,
     ) -> None:
         super().__init__()
         if data.ndim != 2:
@@ -45,6 +52,10 @@ class TimeSeriesDataset(Dataset):
         self.normalize = normalize
         self.stats = stats or self._fit_stats(self.features)
         self.features = self._apply_normalize(self.features, self.stats)
+        # Wavelet decomposition (optional)
+        self.wavelet_cfg = wavelet_cfg or {}
+        if bool(self.wavelet_cfg.get('enabled', False)):
+            self.features = self._apply_wavelet(self.features, self.wavelet_cfg)
 
         self.input_idx = feature_indices if feature_indices is not None else list(range(self.features.shape[1]))
         if target_indices is None:
@@ -74,6 +85,43 @@ class TimeSeriesDataset(Dataset):
         if self.normalize == "minmax":
             return (arr - stats.min) / (stats.max - stats.min + 1e-8)
         return arr
+
+    def _apply_wavelet(self, arr: np.ndarray, cfg: dict) -> np.ndarray:
+        """Apply discrete wavelet transform per-feature and concatenate selected subbands.
+        - arr: (N, F)
+        - returns: (N, F*B) where B depends on `take` (all/approx/details)
+        """
+        if not _HAS_PYWT:
+            raise RuntimeError("pywt not installed. Please install with: pip install PyWavelets")
+        wavelet = str(cfg.get('wavelet', 'db4'))
+        level = int(cfg.get('level', 3))
+        mode = str(cfg.get('mode', 'symmetric'))
+        take = str(cfg.get('take', 'all')).lower()
+
+        N, F = arr.shape
+        outs = []
+        for f in range(F):
+            x = arr[:, f]
+            coeffs = pywt.wavedec(x, wavelet=wavelet, level=level, mode=mode)
+            # coeffs: [cA_L, cD_L, cD_{L-1}, ..., cD_1]
+            sel = []
+            if take == 'approx':
+                sel = [coeffs[0]]
+            elif take == 'details':
+                sel = coeffs[1:]
+            else:
+                sel = coeffs
+            # 对每个分量重采样到原始长度 N 以保持与时间索引对齐
+            parts = []
+            for c in sel:
+                # 简单线性插值到长度 N
+                xi = np.linspace(0, len(c) - 1, num=len(c))
+                xN = np.linspace(0, len(c) - 1, num=N)
+                parts.append(np.interp(xN, xi, c))
+            band = np.stack(parts, axis=1)  # (N, B_f)
+            outs.append(band)
+        out = np.concatenate(outs, axis=1).astype(np.float32)  # (N, F*B)
+        return out
 
     def __len__(self) -> int:
         return self.length
@@ -139,6 +187,7 @@ def create_dataloaders(
         feature_indices=feature_indices,
         target_indices=target_indices,
         normalize=normalize,
+        wavelet_cfg=None,  # 基本数据集仅用于确定长度/分割
     )
 
     n_total = len(base_ds)
@@ -168,6 +217,10 @@ def create_dataloaders(
         stats = NormalizationStats(None, None, None, None)
 
     # Final datasets with fixed stats
+    # Wavelet cfg：若调用方传递，则在 FullConfig 中读取；此处仅提供关键键名
+    wavelet_cfg = getattr(getattr(create_dataloaders, '__caller_cfg__', object()), 'data', None)
+    wavelet_cfg = getattr(wavelet_cfg, 'wavelet', None) if wavelet_cfg is not None else None
+    # 构建最终数据集（包含可选小波分解）
     full_ds = TimeSeriesDataset(
         data=data,
         sequence_length=sequence_length,
@@ -176,6 +229,7 @@ def create_dataloaders(
         target_indices=target_indices,
         normalize=normalize,
         stats=stats,
+        wavelet_cfg=(wavelet_cfg if isinstance(wavelet_cfg, dict) else (wavelet_cfg.__dict__ if wavelet_cfg else None)),
     )
 
     train_set = Subset(full_ds, idx_train)

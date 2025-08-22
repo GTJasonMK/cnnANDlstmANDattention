@@ -14,6 +14,7 @@ from cnn.advanced_cnn import AdvancedCNNFeatureExtractor
 from attention.improved_attention import MultiScaleTemporalAttention
 from attention.local_attention import LocalSelfAttention
 from attention.conformer_block import ConformerBlock
+from attention.spatiotemporal_attention import SpatialTemporalAttention
 from cnn.tcn_feature_extractor import TCNFeatureExtractor
 
 from normalization.revin import RevIN
@@ -66,6 +67,9 @@ class CNNLSTMAttentionModel(nn.Module):
         attn_positional_mode: str = "none",
         local_window_size: int = 64,
         local_dilation: int = 1,
+        # 时空注意力参数（可选，默认安全值）
+        st_mode: str = "serial",
+        st_fuse: str = "sum",
         cnn_use_channel_attention: bool = False,
         cnn_channel_attention_type: str = "eca",
         # 第二阶段：可选归一化与分解配置（字典，向后兼容）
@@ -140,6 +144,12 @@ class CNNLSTMAttentionModel(nn.Module):
                 elif _variant == "conformer":
                     # 用 N 层轻量 Conformer 叠加（此处用1层；可在配置中扩展层数）
                     self.attn = nn.Sequential(ConformerBlock(attn_dim, attn_heads))
+                elif _variant == "spatiotemporal":
+                    self.attn = SpatialTemporalAttention(
+                        d_model=attn_dim, num_heads=attn_heads, dropout=attn_dropout,
+                        mode=st_mode,
+                        fuse=st_fuse,
+                    )
                 else:
                     self.attn = MultiHeadSelfAttention(
                         d_model=attn_dim, num_heads=attn_heads, dropout=attn_dropout,

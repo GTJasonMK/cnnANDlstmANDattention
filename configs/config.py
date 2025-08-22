@@ -65,7 +65,7 @@ class LSTMConfig:
 @dataclass
 class AttentionConfig:
     enabled: bool = True
-    # 注意力变体：standard|multiscale|local|conformer
+    # 注意力变体：standard|multiscale|local|conformer|spatiotemporal
     variant: str = "standard"
     num_heads: int = 4
     dropout: float = 0.1
@@ -77,6 +77,9 @@ class AttentionConfig:
     # 局部注意力
     local_window_size: int = 64
     local_dilation: int = 1
+    # 时空注意力
+    st_mode: str = "serial"   # serial|parallel
+    st_fuse: str = "sum"      # sum|concat
 
 
 @dataclass
@@ -148,6 +151,15 @@ class CheckpointConfig:
 
 
 @dataclass
+class DataWaveletConfig:
+    enabled: bool = False
+    wavelet: str = "db4"            # 常用: db*, sym*, coif*, morlet等
+    level: int = 3                   # 分解层数
+    mode: str = "symmetric"         # 信号延拓模式
+    take: str = "all"               # 选择: all|approx|details
+
+
+@dataclass
 class DataConfig:
     data_path: Optional[str] = None  # path to CSV or NPZ
     sequence_length: int = 64
@@ -161,6 +173,7 @@ class DataConfig:
     num_workers: int = 0
     shuffle_train: bool = True
     drop_last: bool = False
+    wavelet: DataWaveletConfig = field(default_factory=DataWaveletConfig)
 
 
 @dataclass
@@ -391,8 +404,8 @@ def validate_full_config_strict(cfg: 'FullConfig') -> None:
             raise ValueError(f'lstm.{k} 不能为空')
     # Attention
     if m.attention.enabled:
-        if m.attention.variant not in ('standard','multiscale','local','conformer'):
-            raise ValueError('attention.variant 必须为 standard|multiscale|local|conformer')
+        if m.attention.variant not in ('standard','multiscale','local','conformer','spatiotemporal'):
+            raise ValueError('attention.variant 必须为 standard|multiscale|local|conformer|spatiotemporal')
         if m.attention.num_heads is None or m.attention.dropout is None:
             raise ValueError('attention.num_heads/dropout 不能为空')
         if not hasattr(m.attention, 'add_positional_encoding'):

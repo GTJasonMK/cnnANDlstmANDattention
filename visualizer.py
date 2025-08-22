@@ -85,6 +85,22 @@ def plot_attention_heatmap(attn_weights: torch.Tensor, title: str = "Attention W
                            save: bool = True, filename_prefix: str = "attn_heatmap_"):
     if attn_weights is None:
         return
+    # 支持 (B,H,T,T) 或 (w_t, w_f) 元组
+    if isinstance(attn_weights, (tuple, list)) and len(attn_weights) == 2:
+        w_t, w_f = attn_weights
+        # 时间注意力
+        plot_attention_heatmap(w_t, title+" (Temporal)", save, filename_prefix+"temporal_")
+        # 空间注意力：形状 (B,H,F,F)，轴标签换成 Feature
+        if w_f is not None:
+            w = w_f.mean(dim=1).detach().cpu().numpy()
+            b = min(4, w.shape[0])
+            for i in range(b):
+                plt.figure(figsize=(5, 4))
+                plt.imshow(w[i], aspect='auto', origin='lower', cmap='magma')
+                plt.colorbar(); plt.xlabel("Key Feature"); plt.ylabel("Query Feature")
+                plt.title(f"{title} (Spatial, batch {i})"); plt.tight_layout()
+                if save: _savefig(f"{filename_prefix}spatial_{i}.png")
+        return
     # attn_weights: (B, H, T, T)
     w = attn_weights.mean(dim=1).detach().cpu().numpy()  # (B, T, T)
     b = min(4, w.shape[0])

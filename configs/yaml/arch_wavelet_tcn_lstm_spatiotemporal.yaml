@@ -1,0 +1,114 @@
+data:
+  data_path: "E:/code/data/simulated.csv"      # 可用 CLI 或多控制台脚本覆盖（--data-path）
+  sequence_length: 64
+  horizon: 3
+  feature_indices: null
+  target_indices: null
+  train_split: 0.7
+  val_split: 0.15
+  normalize: standard                 # standard|minmax|none
+  batch_size: 64
+  num_workers: 0
+  shuffle_train: true
+  drop_last: false
+  # 小波分解（Wavelet Transform）
+  wavelet:
+    enabled: true
+    wavelet: db4                      # 常用: db*, sym*, coif*, morlet
+    level: 3
+    mode: symmetric
+    take: all                         # all|approx|details
+
+device: null                          # auto: cuda if available else cpu
+
+model:
+  # 使用 TCN 作为卷积骨干（build_model 会自动选用 tcn.layers）
+  cnn:
+    variant: standard                 # 与 tcn.enabled=true 时无关
+    dropout: 0.1
+    layers:
+      - out_channels: 32
+        kernel_size: 3
+      - out_channels: 64
+        kernel_size: 3
+    use_batchnorm: true
+    use_channel_attention: false
+    channel_attention_type: eca
+
+  tcn:
+    enabled: true
+    dropout: 0.0
+    use_batchnorm: true
+    layers:
+      - out_channels: 64
+        kernel_size: 3
+        dilation: 1
+        activation: relu
+        use_weightnorm: true
+      - out_channels: 128
+        kernel_size: 3
+        dilation: 2
+        activation: relu
+        use_weightnorm: true
+      - out_channels: 128
+        kernel_size: 3
+        dilation: 4
+        activation: relu
+        use_weightnorm: true
+
+  lstm:
+    hidden_size: 128
+    num_layers: 2
+    bidirectional: true
+    dropout: 0.1
+    rnn_type: lstm                    # lstm|gru|ssm
+
+  attention:
+    enabled: true
+    variant: spatiotemporal           # 新增：时空注意力
+    num_heads: 4
+    dropout: 0.1
+    st_mode: serial                   # serial|parallel
+    st_fuse: sum                      # sum|concat
+    add_positional_encoding: false
+    positional_mode: none
+
+  fc_hidden: 128
+  forecast_horizon: 3
+  normalization:
+    revin:
+      enabled: false
+  decomposition:
+    enabled: false
+    method: ma
+    kernel: 25
+    seasonal_period: 24
+
+train:
+  epochs: 50
+  loss: mse
+  optimizer:
+    name: adamw
+    lr: 0.001
+    weight_decay: 0.0001
+    betas: [0.9, 0.999]
+  scheduler:
+    name: cosine
+    T_max: 50
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0
+  checkpoints:
+    dir: checkpoints_o
+    save_best_only: true
+    export_best_dir: results/export_best_all   # 可在生成/脚本中统一覆盖
+  gradient_clip: 1.0
+  mixed_precision: false
+  log_dir: runs
+  seed: 42
+  print_every: 50
+
+output_dir: results
+visual_enabled: true
+

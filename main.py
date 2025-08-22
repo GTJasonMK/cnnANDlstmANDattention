@@ -131,6 +131,8 @@ def build_model_with_data(cfg, input_size: int, n_targets: int):
         attn_positional_mode=getattr(m.attention, 'positional_mode', 'none'),
         local_window_size=getattr(m.attention, 'local_window_size', 64),
         local_dilation=getattr(m.attention, 'local_dilation', 1),
+        st_mode=getattr(m.attention, 'st_mode', 'serial'),
+        st_fuse=getattr(m.attention, 'st_fuse', 'sum'),
         cnn_use_channel_attention=getattr(m.cnn, 'use_channel_attention', False),
         cnn_channel_attention_type=getattr(m.cnn, 'channel_attention_type', 'eca'),
         normalization=getattr(m, 'normalization', None),
@@ -158,6 +160,12 @@ def prepare_run(cfg):
     persistent_workers = True if (num_workers and num_workers > 0) else False
     prefetch_factor = 2 if (num_workers and num_workers > 0) else None
 
+    # 将 cfg 传递给 data_preprocessor 以便读取 wavelet 配置
+    try:
+        # 附加一个一次性属性供 create_dataloaders 读取
+        create_dataloaders.__caller_cfg__ = cfg  # type: ignore[attr-defined]
+    except Exception:
+        pass
     train_loader, val_loader, test_loader, input_size, n_targets = create_dataloaders(
         data=data,
         sequence_length=cfg.data.sequence_length,
@@ -175,6 +183,10 @@ def prepare_run(cfg):
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
     )
+    try:
+        delattr(create_dataloaders, '__caller_cfg__')  # 清理
+    except Exception:
+        pass
 
     model = build_model_with_data(cfg, input_size, n_targets)
     return data, model, (train_loader, val_loader, test_loader)
