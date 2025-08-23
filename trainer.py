@@ -218,12 +218,12 @@ class Trainer:
             if is_best:
                 best_path = os.path.join(self.cfg.train.checkpoints.dir, "model_best.pt")
                 torch.save(ckpt, best_path)
-                # 可选：将最佳模型另外导出到指定目录并按架构首字母命名（例如 sgs.pt）
+                # 可选：将最佳模型另外导出到指定目录；确保命名全局唯一，避免覆盖
                 export_dir = getattr(self.cfg.train.checkpoints, 'export_best_dir', None)
                 if export_dir:
                     os.makedirs(export_dir, exist_ok=True)
                     m = self.cfg.model
-                    # Build human-readable slug
+                    # 可读的结构标签
                     cnn_variant = str(getattr(m.cnn, 'variant', 'standard')).strip().lower()
                     # If TCN enabled, override cnn tag to 'tcn'
                     try:
@@ -241,15 +241,58 @@ class Trainer:
                     bi = bool(getattr(m.lstm, 'bidirectional', True))
                     heads = int(getattr(m.attention, 'num_heads', 4)) if hasattr(m, 'attention') else 0
                     slug = f"{cnn_tag}-{rnn_type}-{attn_variant}-pos{pos_mode}-ca{'on' if ca_on else 'off'}-{'bi' if bi else 'uni'}-H{heads}"
-                    # Deterministic short hash from model config to avoid collisions
+                    # 基于模型配置的确定性短哈希
                     try:
                         cfg_model_dict = asdict(canonicalize_for_checkpoint(self.cfg)).get('model', {})
                     except Exception:
                         cfg_model_dict = {}
                     hash_src = json.dumps(cfg_model_dict, sort_keys=True, ensure_ascii=False)
                     sh = hashlib.sha1(hash_src.encode('utf-8')).hexdigest()[:8]
-                    export_name = f"{slug}_{sh}.pt"
+                    # 运行标签：优先取 output_dir 的最后一级（如 YAML 文件名）
+                    run_tag = ''
+                    try:
+                        od = getattr(self.cfg, 'output_dir', None)
+                        if od:
+                            run_tag = os.path.basename(os.path.normpath(str(od)))
+                    except Exception:
+                        run_tag = ''
+                    run_tag = (run_tag or 'run').replace(' ', '_').replace('/', '_').replace('\\', '_')
+
+                    # 数据/实验标签：数据名+序列长度+预测步长+归一化+小波
+                    try:
+                        d = getattr(self.cfg, 'data', None)
+                        dp = str(getattr(d, 'data_path', '')) if d is not None else ''
+                        ds_name = os.path.splitext(os.path.basename(dp))[0] if dp else 'data'
+                        seq_len = getattr(d, 'sequence_length', None) if d is not None else None
+                        # 优先 model.forecast_horizon，其次 data.horizon
+                        try:
+                            hor = getattr(self.cfg.model, 'forecast_horizon', None)
+                            if hor is None:
+                                hor = getattr(d, 'horizon', None) if d is not None else None
+                        except Exception:
+                            hor = getattr(d, 'horizon', None) if d is not None else None
+                        norm = str(getattr(d, 'normalize', 'standard')).lower() if d is not None else 'standard'
+                        norm_tag = {'standard':'std','minmax':'mm','none':'none'}.get(norm, norm)
+                        wav = getattr(d, 'wavelet', None) if d is not None else None
+                        wav_on = bool(getattr(wav, 'enabled', False)) if wav is not None else False
+                        wav_base = str(getattr(wav, 'wavelet', 'db4')).lower() if wav_on else 'none'
+                        data_tag = f"{ds_name}-L{seq_len if seq_len is not None else 'NA'}-H{hor if hor is not None else 'NA'}-{norm_tag}-wav{'on' if wav_on else 'off'}{(':'+wav_base) if wav_on else ''}"
+                    except Exception:
+                        data_tag = 'exp'
+                    data_tag = data_tag.replace(' ', '_').replace('/', '_').replace('\\', '_')
+
+                    base_name = f"{run_tag}__{data_tag}__{slug}_{sh}"
+                    export_name = f"{base_name}.pt"
                     export_path = os.path.join(export_dir, export_name)
+                    # 若重名则追加递增后缀，避免覆盖
+                    if os.path.exists(export_path):
+                        idx = 2
+                        while True:
+                            cand = os.path.join(export_dir, f"{base_name}-{idx}.pt")
+                            if not os.path.exists(cand):
+                                export_path = cand
+                                break
+                            idx += 1
                     torch.save(ckpt, export_path)
                     try:
                         print(f"[checkpoint] Exported BEST to {export_path}")

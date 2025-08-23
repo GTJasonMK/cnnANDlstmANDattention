@@ -198,6 +198,28 @@ def main():
     cfg = build_base({**baseline, 'ca': flipped_ca}, args.data_path, export_root, args.epochs)
     save_cfg(cfg, f"ctrl_ca-{'on' if flipped_ca else 'off'}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if flipped_ca else 'off'}.yaml", note=f"Control variable: ChannelAttention={'on' if flipped_ca else 'off'}")
 
+    # 7) Wavelet sweeps（可选）：
+    if args.include_wavelet:
+        # on/off 开关
+        cfg_on = build_base(baseline, args.data_path, export_root, args.epochs)
+        cfg_on['data']['wavelet']['enabled'] = True
+        # 使用 wavelet-bases 的第一个作为默认基线
+        first_base = (args.wavelet_bases.split(',')[0]).strip()
+        if first_base:
+            cfg_on['data']['wavelet']['wavelet'] = first_base
+        save_cfg(cfg_on, f"ctrl_wavelet-on__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note="Control variable: Wavelet enabled=true")
+
+        cfg_off = build_base(baseline, args.data_path, export_root, args.epochs)
+        cfg_off['data']['wavelet']['enabled'] = False
+        save_cfg(cfg_off, f"ctrl_wavelet-off__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note="Control variable: Wavelet enabled=false")
+
+        # 各小波基函数
+        for wb in [s.strip() for s in args.wavelet_bases.split(',') if s.strip()]:
+            cfg_b = build_base(baseline, args.data_path, export_root, args.epochs)
+            cfg_b['data']['wavelet']['enabled'] = True
+            cfg_b['data']['wavelet']['wavelet'] = wb
+            save_cfg(cfg_b, f"ctrl_wavelet-base-{wb}__{baseline['cnn']}-{baseline['attn']}-{baseline['rnn']}-pos{baseline['pos']}-ca{'on' if baseline['ca'] else 'off'}.yaml", note=f"Control variable: Wavelet base={wb}")
+
     print(f"Generated control-variable YAMLs into {out_dir}")
 
 

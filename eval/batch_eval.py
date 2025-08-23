@@ -85,12 +85,17 @@ def _save_csv(rows: List[Dict[str, Any]], out_csv: str):
     try:
         import pandas as pd
         df = pd.DataFrame(rows)
-        # 指标列按常见顺序重排
-        cols = [
-            'model', 'status', 'mse', 'mae', 'rmse', 'mape', 'r2', 'params', 'checkpoint'
+        # 标准化指标列（新增 test_*/val_*），并保持向后兼容
+        prefer_cols = [
+            'model', 'status',
+            'test_loss', 'test_mse', 'test_mae', 'test_rmse', 'test_r2',
+            'val_loss', 'val_mse', 'val_mae', 'val_rmse', 'val_r2',
+            'mse', 'mae', 'rmse', 'mape', 'r2',  # 兼容旧列
+            'params', 'checkpoint'
         ]
-        present = [c for c in cols if c in df.columns]
-        df = df[present + [c for c in df.columns if c not in present]]
+        present = [c for c in prefer_cols if c in df.columns]
+        others = [c for c in df.columns if c not in present]
+        df = df[present + others]
         df.to_csv(out_csv, index=False)
     except Exception:
         # 纯文本CSV

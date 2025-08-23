@@ -38,6 +38,12 @@ CTRL_NAME_RE = re.compile(
     r"ctrl_(?P<factor>[^_]+)__(?P<slug>[^.]+)", re.IGNORECASE
 )
 
+# data_tag like: {dataset}-L{seq}-H{hor}-{norm}-wav{on|off}[:{base}]
+DATA_TAG_RE = re.compile(
+    r"(?P<dataset>[a-z0-9_\-]+)-l(?P<seq>\d+)-h(?P<hor>\d+)-(?P<norm>std|mm|none)-wav(?P<wav>on|off)(?::(?P<base>[a-z0-9_\-]+))?",
+    re.IGNORECASE,
+)
+
 
 def _lower(x: Optional[str]) -> Optional[str]:
     return None if x is None else str(x).strip().lower()
@@ -104,11 +110,32 @@ def extract_arch_from_row(row: pd.Series) -> Dict[str, Any]:
         row.get("yaml_name"), row.get("config_name"), row.get("run_name"), row.get("file"), row.get("path")
     ]
     for t in text_sources:
-        if t and any(v is None for v in fields.values()):
-            d = parse_slug_from_text(str(t))
-            for k, v in d.items():
-                if fields.get(k) is None and v is not None:
-                    fields[k] = v
+        if t:
+            # fill arch slug
+            if any(v is None for v in fields.values()):
+                d = parse_slug_from_text(str(t))
+                for k, v in d.items():
+                    if fields.get(k) is None and v is not None:
+                        fields[k] = v
+            # parse data_tag if present
+            mdt = DATA_TAG_RE.search(str(t).lower())
+            if mdt:
+                try:
+                    seq = int(mdt.group("seq")) if mdt.group("seq") else None
+                except Exception:
+                    seq = None
+                try:
+                    hor = int(mdt.group("hor")) if mdt.group("hor") else None
+                except Exception:
+                    hor = None
+                fields.setdefault("dataset", mdt.group("dataset"))
+                fields.setdefault("seq_len", seq)
+                fields.setdefault("horizon", hor)
+                fields.setdefault("normalize", mdt.group("norm"))
+                fields.setdefault("wav_on", (mdt.group("wav") == "on"))
+                base = mdt.group("base")
+                if base:
+                    fields.setdefault("wav_base", base)
 
     # Default values
     fields["cnn"] = fields["cnn"] or "standard"
@@ -131,27 +158,66 @@ def extract_arch_from_row(row: pd.Series) -> Dict[str, Any]:
 # -----------------------------
 
 def resolve_metric(df: pd.DataFrame, metric: str) -> str:
-    """Resolve the actual metric column present in df.
-    Accepts names like 'loss', 'val_loss', 'test_loss'. If the requested name is
-    missing, tries common prefixed/unprefixed alternatives.
+    """Resolve the metric column name from a variety of CSV schemas.
+    - Case-insensitive; ignores punctuation ("/", "-", " ", ".") and underscores when matching
+    - Understands prefixes: val_, valid_, test_
+    - Falls back to substring matches
+    - If still not found and only a single numeric column exists, use it with a warning
+    - Otherwise raises and prints available numeric columns
     """
-    cols = set(df.columns)
-    if metric in cols:
-        return metric
-    # derive base (strip common prefixes)
-    base = metric
-    for p in ("val_", "valid_", "test_"):
-        if metric.startswith(p):
-            base = metric[len(p):]
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+    cols = list(df.columns)
+    norm_map = {}
+    for c in cols:
+        norm_map.setdefault(_norm(c), []).append(c)
+
+    target = _norm(metric)
+    # Strip common prefixes from target
+    for p in ("val", "valid", "test"):
+        if target.startswith(p):
+            target = target[len(p):]
             break
-    candidates = [
-        metric,
-        f"val_{base}", f"valid_{base}", f"test_{base}", base,
-    ]
-    for c in candidates:
-        if c in cols:
-            return c
-    raise KeyError(f"Metric '{metric}' not found. Tried candidates: {candidates}. Available: {list(df.columns)[:30]} ...")
+
+    # exact normalized matches for candidates
+    candidates = [metric, f"val_{metric}", f"valid_{metric}", f"test_{metric}",
+                  target, f"val{target}", f"valid{target}", f"test{target}"]
+    for cand in candidates:
+        key = _norm(cand)
+        if key in norm_map:
+            # prefer the first occurrence
+            return norm_map[key][0]
+
+    # substring search in normalized names
+    matches = [orig for key, lst in norm_map.items() for orig in lst if target in key]
+    if matches:
+        # heuristic: prefer names containing 'val' or 'test' for loss-like metrics
+        pref = [c for c in matches if ('val' in c.lower() or 'test' in c.lower())]
+        return (pref[0] if pref else matches[0])
+
+    # smart fallback for '*loss*' metrics: map to MSE/RMSE/MAE if present
+    if 'loss' in target:
+        prefer = ['val_mse', 'test_mse', 'mse', 'val_rmse', 'test_rmse', 'rmse', 'val_mae', 'test_mae', 'mae']
+        for cand in prefer:
+            key = _norm(cand)
+            if key in norm_map:
+                chosen = norm_map[key][0]
+                print(f"[INFO] Metric '{metric}' not found; using '{chosen}' as loss proxy")
+                return chosen
+
+    # fallback: single numeric column
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(num_cols) == 1:
+        print(f"[INFO] Metric '{metric}' not found; using the only numeric column '{num_cols[0]}'")
+        return num_cols[0]
+
+    raise KeyError(
+        "Metric '%s' not found. Available numeric columns: %s" % (
+            metric, num_cols[:30])
+    )
 
 
 def group_rank(df: pd.DataFrame, group_col: str, metric: str, ascending: bool) -> pd.DataFrame:
@@ -248,6 +314,12 @@ def main():
         ("ca", "Channel Attention (on/off)"),
         ("wavelet_on", "Wavelet Enabled"),
         ("wavelet_base", "Wavelet Base"),
+        # New: data/experiment dimensions parsed from filename
+        ("dataset", "Dataset (from filename)"),
+        ("seq_len", "Sequence Length"),
+        ("horizon", "Forecast Horizon"),
+        ("normalize", "Normalization (abbr)"),
+        ("wav_on", "Wavelet On (from name)"),
     ]
 
     # Write summary per dimension
@@ -275,7 +347,11 @@ def main():
 
     # Save merged overview with selected columns
     cols_to_keep = [
-        "cnn", "rnn", "attn", "pos", "ca", "wavelet_on", "wavelet_base", used_metric,
+        "cnn", "rnn", "attn", "pos", "ca",
+        "wavelet_on", "wavelet_base",
+        # data/experiment parsed cols
+        "dataset", "seq_len", "horizon", "normalize", "wav_on",
+        used_metric,
     ]
     cols_to_keep += [c for c in ["checkpoint", "yaml", "config_name", "run_name"] if c in mdf.columns]
     mdf[cols_to_keep].to_csv(out_dir / "eval_with_arch.csv", index=False)

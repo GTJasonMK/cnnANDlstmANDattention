@@ -626,8 +626,9 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
         ti = data_cfg.get("target_indices", None)
         targ_idx = _to_int_list(ti)
         if targ_idx is None:
-            # Align with training default: when target_indices is None, use ALL features as targets
-            targ_idx = list(range(arr.shape[1]))
+            # Align with training default: when target_indices is None, use LAST feature as target
+            # This matches the common training default behavior (last column as target)
+            targ_idx = [arr.shape[1] - 1]
 
     # Fit stats on test data (note: may differ from training-time stats)
     _dlog(f"data_shape={arr.shape} first_row_sample={arr[0][:5] if arr.size>0 else 'EMPTY'}")
@@ -884,8 +885,19 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
     _dlog(f"inference done, preds_shape={tuple(preds.shape)}")
     metrics = regression_metrics(preds, Y)
 
+    # Standardized metric keys (test_*) and backward-compatible aliases
+    std_metrics = {
+        'test_loss': float(metrics.get('mse', np.nan)),  # treat loss as MSE by default
+        'test_mse': float(metrics.get('mse', np.nan)),
+        'test_mae': float(metrics.get('mae', np.nan)),
+        'test_rmse': float(metrics.get('rmse', np.nan)) if 'rmse' in metrics else float(np.sqrt(metrics.get('mse', np.nan))) if 'mse' in metrics else np.nan,
+        'test_r2': float(metrics.get('r2', np.nan)),
+    }
+    # Keep original keys for backward compatibility
+    merged_metrics = {**metrics, **std_metrics}
+
     # Print metrics
-    print(json.dumps({k: round(v, 6) for k, v in metrics.items()}, ensure_ascii=False))
+    print(json.dumps({k: (None if v is None or (isinstance(v, float) and np.isnan(v)) else round(v, 6)) for k, v in merged_metrics.items()}, ensure_ascii=False))
 
     # Visualizations
     try:
