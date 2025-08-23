@@ -229,6 +229,21 @@ def main():
         except Exception:
             arch = {}
 
+        # 从 checkpoint 的 cfg 中提取 wavelet 配置（即使评估失败也写入）
+        def _safe_get(d, *ks, default=None):
+            cur = d
+            for k in ks:
+                if not isinstance(cur, dict):
+                    return default
+                cur = cur.get(k, None)
+                if cur is None:
+                    return default
+            return cur
+        wv_enabled = bool(_safe_get(cfg_i, 'data', 'wavelet', 'enabled', default=False))
+        wv_base = _safe_get(cfg_i, 'data', 'wavelet', 'wavelet', default=None)
+        if not wv_enabled:
+            wv_base = 'none'
+
         row: Dict[str, Any] = {
             'model': name,
             'checkpoint': ckpt,
@@ -237,6 +252,8 @@ def main():
             'cnn_variant': arch.get('cnn_variant'),
             'rnn_type': arch.get('rnn_type'),
             'attn_variant': arch.get('attn_variant'),
+            'wavelet_on': wv_enabled,
+            'wavelet_base': (wv_base or 'none'),
         }
         if isinstance(metrics, dict):
             row.update(metrics)

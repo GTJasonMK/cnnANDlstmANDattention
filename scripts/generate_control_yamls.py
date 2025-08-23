@@ -101,7 +101,8 @@ def build_base(baseline: Dict[str, Any], data_path: str, export_root: Path, epoc
     cfg['model']['lstm']['rnn_type'] = baseline['rnn']
     cfg['model']['attention']['variant'] = baseline['attn']
     cfg['model']['attention']['positional_mode'] = baseline['pos']
-    cfg['model']['attention']['add_positional_encoding'] = False
+    # 若选择了非 none 的位置编码，默认开启 add_positional_encoding
+    cfg['model']['attention']['add_positional_encoding'] = bool(baseline.get('pos') not in (None, 'none'))
     if baseline['ca']:
         cfg['model']['cnn']['use_channel_attention'] = True
         cfg['model']['cnn']['channel_attention_type'] = 'eca'
@@ -149,7 +150,7 @@ def main():
     pos_modes = ['none', 'absolute', 'alibi', 'rope'] if args.include_positional else ['none']
 
     def save_cfg(cfg: Dict[str, Any], name: str, note: str = ""):
-        # 统一最优模型导出目录，添加说明
+        # 统一最优模型导出目录（所有 YAML 的最佳模型导出到同一个目录）
         cfg['train'].setdefault('checkpoints', {})
         cfg['train']['checkpoints']['save_best_only'] = True
         cfg['train']['checkpoints']['export_best_dir'] = str(export_root)
