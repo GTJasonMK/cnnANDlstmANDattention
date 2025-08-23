@@ -31,6 +31,10 @@ from eval.standalone_eval import evaluate, parse_indices, _extract_arch_meta
 
 # 强制严格模式：要求 checkpoint 中 cfg 完整准确
 os.environ.setdefault("EVAL_STRICT", "1")
+# 宽松自动对齐/推断开关：默认开启以减少评估失败（可被外部环境变量覆盖）
+os.environ.setdefault("EVAL_AUTO_ALIGN_INPUT", "1")
+os.environ.setdefault("EVAL_AUTO_ALIGN_TARGETS", "1")
+os.environ.setdefault("EVAL_AUTO_INFER_HZ", "1")
 
 
 def _dbg_enabled() -> bool:
