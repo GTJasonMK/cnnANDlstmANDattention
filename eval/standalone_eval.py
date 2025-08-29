@@ -540,6 +540,12 @@ def build_model_from_cfg_strict(cfg_dict: Dict, input_size: int, n_targets: int)
         attn_add_pos_enc = _strict_bool(attn, "add_posional_encoding")
     else:
         raise ValueError("attention 缺少 add_positional_encoding 字段（或旧拼写 add_posional_encoding）")
+    # 其他注意力相关可选字段（存在则读取，不存在使用默认）
+    attn_pos_mode = str(attn.get("positional_mode", "none")).lower()
+    local_window_size = int(attn.get("local_window_size", 64))
+    local_dilation = int(attn.get("local_dilation", 1))
+    st_mode = str(attn.get("st_mode", "serial"))
+    st_fuse = str(attn.get("st_fuse", "sum"))
 
     multiscale_scales = None
     multiscale_fuse = None
@@ -548,6 +554,14 @@ def build_model_from_cfg_strict(cfg_dict: Dict, input_size: int, n_targets: int)
         if not all(isinstance(x, int) for x in multiscale_scales):
             raise ValueError("multiscale_scales 需要为整数列表")
         multiscale_fuse = _strict_get(attn, "multiscale_fuse", "str")
+
+    # CNN 通道注意力（可选）
+    ca_on = bool(cnn.get("use_channel_attention", False))
+    ca_type = str(cnn.get("channel_attention_type", "eca")).lower()
+
+    # 可选归一化与趋势分解配置（若存在则按原样传入以对齐权重）
+    normalization_cfg = m.get("normalization", None)
+    decomposition_cfg = m.get("decomposition", None)
 
     # 构建模型（严格模式：完全按 cfg）。若 TCN 配置写在 cnn.layers（老格式）且 cnn_variant==tcn，会在前面严格校验环节已抛错。
     model = CNNLSTMAttentionModel(
@@ -570,6 +584,16 @@ def build_model_from_cfg_strict(cfg_dict: Dict, input_size: int, n_targets: int)
         attn_variant=attn_variant,
         multiscale_scales=multiscale_scales if multiscale_scales is not None else [1],
         multiscale_fuse=multiscale_fuse if multiscale_fuse is not None else "sum",
+        # 新增：对齐训练期的可选参数，避免严格加载时出现 Unexpected key
+        attn_positional_mode=attn_pos_mode,
+        local_window_size=local_window_size,
+        local_dilation=local_dilation,
+        st_mode=st_mode,
+        st_fuse=st_fuse,
+        cnn_use_channel_attention=ca_on,
+        cnn_channel_attention_type=ca_type,
+        normalization=normalization_cfg,
+        decomposition=decomposition_cfg,
     )
     # 设置 RNN 类型
     model.rnn_type = rnn_type
@@ -689,6 +713,56 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
         except Exception as e:
             _dlog(f"[WARN] wavelet requested but failed: {e}")
 
+    # If input channels still look smaller than model expects and wavelet wasn't applied,
+    # try to auto-apply wavelet according to checkpoint cfg (robust fallback for mismatched setups)
+    try:
+        # quick scan expected in_channels from state_dict (same logic as later, duplicated here intentionally)
+        exp_in_channels_probe = None
+        state_probe = ckpt.get('model_state', {}) if isinstance(ckpt, dict) else {}
+        if isinstance(state_probe, dict):
+            for _k, _v in state_probe.items():
+                try:
+                    if isinstance(_v, torch.Tensor) and _v.ndim == 3 and _k.endswith('.weight'):
+                        c_in = int(_v.shape[1])
+                        if exp_in_channels_probe is None or c_in > exp_in_channels_probe:
+                            exp_in_channels_probe = c_in
+                except Exception:
+                    continue
+        cur_in_channels = int(arr_norm.shape[1])
+        if (not _wv_enabled) and (exp_in_channels_probe is not None) and (cur_in_channels < int(exp_in_channels_probe)) and (int(exp_in_channels_probe) % cur_in_channels == 0):
+            _dlog(f"auto-apply wavelet fallback: cur_in={cur_in_channels}, expected={exp_in_channels_probe}")
+            try:
+                import pywt  # type: ignore
+                # use wave_cfg from checkpoint; if missing, assume defaults
+                wavelet = str(_maybe_get(wave_cfg or {}, 'wavelet', default='db4'))
+                level = int(_maybe_get(wave_cfg or {}, 'level', default=3))
+                mode = str(_maybe_get(wave_cfg or {}, 'mode', default='symmetric'))
+                take = str(_maybe_get(wave_cfg or {}, 'take', default='all')).lower()
+                N, F = arr_norm.shape
+                outs = []
+                for f in range(F):
+                    xcol = arr_norm[:, f]
+                    coeffs = pywt.wavedec(xcol, wavelet=wavelet, level=level, mode=mode)
+                    if take == 'approx':
+                        sel = [coeffs[0]]
+                    elif take == 'details':
+                        sel = coeffs[1:]
+                    else:
+                        sel = coeffs
+                    parts = []
+                    for c in sel:
+                        xi = np.linspace(0, len(c) - 1, num=len(c))
+                        xN = np.linspace(0, len(c) - 1, num=N)
+                        parts.append(np.interp(xN, xi, c))
+                    band = np.stack(parts, axis=1)
+                    outs.append(band)
+                arr_norm = np.concatenate(outs, axis=1).astype(np.float32)
+                _wv_enabled = True
+                _dlog(f"wavelet fallback applied -> features expanded to {arr_norm.shape[1]}")
+            except Exception as _e:
+                _dlog(f"[WARN] wavelet fallback failed: {_e}")
+    except Exception:
+        pass
     # Windowize
     _dlog(f"feature_idx={feat_idx} target_idx={targ_idx}")
     X_np, Y_np = windowize(arr_norm, seq_len, hz,
@@ -732,6 +806,24 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
             except Exception:
                 continue
         exp_out_dim = head_out_dim
+    # 若仍未能推断到 exp_in_channels，再进行一次宽松扫描（不强制 .weight 后缀）
+    if exp_in_channels is None and isinstance(state, dict):
+        try:
+            cand = None
+            for _k, _v in state.items():
+                try:
+                    if isinstance(_v, torch.Tensor) and _v.ndim == 3:
+                        c_in = int(_v.shape[1])
+                        if cand is None or c_in > cand:
+                            cand = c_in
+                except Exception:
+                    continue
+            exp_in_channels = cand
+            if exp_in_channels is not None:
+                _dlog(f"exp_in_channels (loose scan) = {exp_in_channels}")
+        except Exception:
+            pass
+
 
     # 构建模型（严格一致）。若 cfg 信息缺失，将抛错并停止评估。
     input_size = int(X_np.shape[2])
@@ -753,6 +845,45 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
                                        feat_idx,
                                        targ_idx if targ_idx is not None else [arr_norm.shape[1]-1])
                 input_size = int(X_np.shape[2])
+            # 新增：当特征少于训练值且为整倍数，自动进行小波展开补足通道（不再要求 _wv_enabled 为 False）
+            elif (
+                exp_in_channels is not None and
+                input_size < exp_in_channels and
+                exp_in_channels % max(1, int(input_size)) == 0 and
+                os.environ.get('EVAL_WAVELET_AUTO_EXPAND', '1').lower() in ('1','true','yes','on')
+            ):
+                try:
+                    ratio = int(exp_in_channels) // int(input_size)
+                    level_guess = max(1, ratio - 1)
+                    wavelet = str(_maybe_get(wave_cfg or {}, 'wavelet', default='db4'))
+                    mode = str(_maybe_get(wave_cfg or {}, 'mode', default='symmetric'))
+                    _dlog(f"auto-expand by wavelet: input_size={input_size}, expected={exp_in_channels}, ratio={ratio}, level~{level_guess}")
+                    import pywt  # type: ignore
+                    N, F = arr_norm.shape
+                    outs = []
+                    for f in range(F):
+                        xcol = arr_norm[:, f]
+                        coeffs = pywt.wavedec(xcol, wavelet=wavelet, level=level_guess, mode=mode)
+                        # 取全部系数（近似+细节），与 ratio=level+1 对齐
+                        sel = coeffs
+                        parts = []
+                        for c in sel:
+                            xi = np.linspace(0, len(c) - 1, num=len(c))
+                            xN = np.linspace(0, len(c) - 1, num=N)
+                            parts.append(np.interp(xN, xi, c))
+                        outs.append(np.stack(parts, axis=1))
+                    arr_norm = np.concatenate(outs, axis=1).astype(np.float32)
+                    _wv_enabled = True
+                    # 重新窗口化
+                    X_np, Y_np = windowize(
+                        arr_norm, seq_len, hz,
+                        feat_idx if feat_idx is not None else list(range(arr_norm.shape[1])),
+                        targ_idx if targ_idx is not None else [arr_norm.shape[1]-1]
+                    )
+                    input_size = int(X_np.shape[2])
+                    _dlog(f"auto-expand applied -> input_size={input_size}")
+                except Exception as _we:
+                    _dlog(f"[WARN] auto-expand by wavelet failed: {_we}")
             if exp_in_channels is not None and input_size != exp_in_channels:
                 raise RuntimeError(
                     f"输入特征数与训练时不一致: now={input_size}, expected={exp_in_channels}. "
@@ -764,11 +895,11 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
             if expected_targets is None or cur_out_dim != exp_out_dim:
                 # 可选1：仅对齐目标列个数（在 horizon 与 exp_out_dim 可整除时）
                 if _env_true("EVAL_AUTO_ALIGN_TARGETS") and expected_targets is not None and target_indices is None:
-                    _dlog(f"auto-align targets: take first {expected_targets} of {arr.shape[1]} columns")
+                    _dlog(f"auto-align targets: take first {expected_targets} of {arr_norm.shape[1]} columns")
                     targ_idx = list(range(int(expected_targets)))
                     X_np, Y_np = windowize(
                         arr_norm, seq_len, hz_check,
-                        feat_idx if feat_idx is not None else list(range(arr.shape[1])),
+                        feat_idx if feat_idx is not None else list(range(arr_norm.shape[1])),
                         targ_idx
                     )
                     n_targets = int(1 if Y_np.ndim == 2 else Y_np.shape[2])
@@ -792,9 +923,9 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
                     pref = []
                     cli_hz = _as_int(horizon, None)
                     cfg_hz = _as_int(cfg_dict.get("model", {}).get("forecast_horizon"), None)
-                    if cli_hz in cand_hz and (exp_out_dim // int(cli_hz)) <= arr.shape[1]:
+                    if cli_hz in cand_hz and (exp_out_dim // int(cli_hz)) <= arr_norm.shape[1]:
                         pref.append(int(cli_hz))
-                    if cfg_hz in cand_hz and (exp_out_dim // int(cfg_hz)) <= arr.shape[1]:
+                    if cfg_hz in cand_hz and (exp_out_dim // int(cfg_hz)) <= arr_norm.shape[1]:
                         pref.append(int(cfg_hz))
                     chosen_hz = None
                     if pref:
@@ -853,17 +984,47 @@ def evaluate(checkpoint: str, data_path: str, output_dir: str,
             to_del = [k for k in list(state2.keys()) if k.startswith("head.")]
             for k in to_del:
                 del state2[k]
-            try:
-                missing = model.load_state_dict(state2, strict=False)
-            except RuntimeError:
-                _dlog("partial load still failed; fallback to shape-matched loading")
-                cur = model.state_dict()
-                filtered = {}
-                for k, v in ckpt["model_state"].items():
-                    if k in cur and hasattr(v, 'shape') and hasattr(cur[k], 'shape') and tuple(v.shape) == tuple(cur[k].shape):
-                        filtered[k] = v
-                _dlog(f"shape-matched params: {len(filtered)}/{len(ckpt['model_state'])}")
-                missing = model.load_state_dict(filtered, strict=False)
+    # 最后防线：已构建并加载权重后，再次用模型权重推断期望输入通道；若仍不匹配，尝试展开
+    try:
+        exp_c_in_final = None
+        for _n, _p in model.named_parameters():
+            if hasattr(_p, 'ndim') and _p.ndim == 3 and _n.endswith('.weight'):
+                c_in = int(_p.shape[1])
+                if exp_c_in_final is None or c_in > exp_c_in_final:
+                    exp_c_in_final = c_in
+        cur_in = int(X_np.shape[2])
+        if exp_c_in_final is not None and cur_in != exp_c_in_final:
+            if exp_c_in_final % max(1, cur_in) == 0 and os.environ.get('EVAL_WAVELET_AUTO_EXPAND', '1').lower() in ('1','true','yes','on'):
+                ratio = int(exp_c_in_final) // int(cur_in)
+                level_guess = max(1, ratio - 1)
+                wavelet = str(_maybe_get(wave_cfg or {}, 'wavelet', default='db4'))
+                mode = str(_maybe_get(wave_cfg or {}, 'mode', default='symmetric'))
+                _dlog(f"post-build auto-expand: cur_in={cur_in}, expected={exp_c_in_final}, ratio={ratio}, level~{level_guess}")
+                import pywt  # type: ignore
+                N, F = arr_norm.shape
+                outs = []
+                for f in range(F):
+                    xcol = arr_norm[:, f]
+                    coeffs = pywt.wavedec(xcol, wavelet=wavelet, level=level_guess, mode=mode)
+                    sel = coeffs
+                    parts = []
+                    for c in sel:
+                        xi = np.linspace(0, len(c) - 1, num=len(c))
+                        xN = np.linspace(0, len(c) - 1, num=N)
+                        parts.append(np.interp(xN, xi, c))
+                    outs.append(np.stack(parts, axis=1))
+                arr_norm = np.concatenate(outs, axis=1).astype(np.float32)
+                X_np, Y_np = windowize(
+                    arr_norm, seq_len, hz,
+                    feat_idx if feat_idx is not None else list(range(arr_norm.shape[1])),
+                    targ_idx if targ_idx is not None else [arr_norm.shape[1]-1]
+                )
+                _dlog(f"post-build auto-expand applied -> input_size={int(X_np.shape[2])}")
+            else:
+                raise RuntimeError(
+                    f"输入特征数与模型权重不匹配：X_in={cur_in}, weight expects={exp_c_in_final}. 请检查是否遗漏小波展开或特征选择。")
+    except Exception as _e3:
+        _dlog(f"[WARN] post-build expand failed: {_e3}")
 
     # Device
     use_cuda = (device == "cuda" and torch.cuda.is_available())

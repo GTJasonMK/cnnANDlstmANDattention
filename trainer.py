@@ -238,9 +238,11 @@ class Trainer:
                     attn_variant = str(getattr(m.attention, 'variant', 'standard')).strip().lower()
                     pos_mode = str(getattr(m.attention, 'positional_mode', 'none')).strip().lower()
                     ca_on = bool(getattr(m.cnn, 'use_channel_attention', False))
+                    ca_type = str(getattr(m.cnn, 'channel_attention_type', 'eca')).strip().lower() if ca_on else 'off'
                     bi = bool(getattr(m.lstm, 'bidirectional', True))
                     heads = int(getattr(m.attention, 'num_heads', 4)) if hasattr(m, 'attention') else 0
-                    slug = f"{cnn_tag}-{rnn_type}-{attn_variant}-pos{pos_mode}-ca{'on' if ca_on else 'off'}-{'bi' if bi else 'uni'}-H{heads}"
+                    ca_tag = f"ca{ca_type}" if ca_on else "caoff"
+                    slug = f"{cnn_tag}-{rnn_type}-{attn_variant}-pos{pos_mode}-{ca_tag}-{'bi' if bi else 'uni'}-H{heads}"
                     # 基于模型配置的确定性短哈希
                     try:
                         cfg_model_dict = asdict(canonicalize_for_checkpoint(self.cfg)).get('model', {})
@@ -258,7 +260,7 @@ class Trainer:
                         run_tag = ''
                     run_tag = (run_tag or 'run').replace(' ', '_').replace('/', '_').replace('\\', '_')
 
-                    # 数据/实验标签：数据名+序列长度+预测步长+归一化+小波
+                    # 数据/实验标签：数据名+序列长度+预测步长+归一化+小波+RevIN/Decomp
                     try:
                         d = getattr(self.cfg, 'data', None)
                         dp = str(getattr(d, 'data_path', '')) if d is not None else ''
@@ -274,26 +276,68 @@ class Trainer:
                         norm = str(getattr(d, 'normalize', 'standard')).lower() if d is not None else 'standard'
                         norm_tag = {'standard':'std','minmax':'mm','none':'none'}.get(norm, norm)
                         wav = getattr(d, 'wavelet', None) if d is not None else None
-                        wav_on = bool(getattr(wav, 'enabled', False)) if wav is not None else False
-                        wav_base = str(getattr(wav, 'wavelet', 'db4')).lower() if wav_on else 'none'
-                        data_tag = f"{ds_name}-L{seq_len if seq_len is not None else 'NA'}-H{hor if hor is not None else 'NA'}-{norm_tag}-wav{'on' if wav_on else 'off'}{(':'+wav_base) if wav_on else ''}"
+                        # Robust: support dataclass or dict for wavelet config
+                        if isinstance(wav, dict):
+                            wav_on = bool(wav.get('enabled', False))
+                            wav_base = str(wav.get('wavelet', 'db4')).lower() if wav_on else 'none'
+                        else:
+                            wav_on = bool(getattr(wav, 'enabled', False)) if wav is not None else False
+                            wav_base = str(getattr(wav, 'wavelet', 'db4')).lower() if wav_on else 'none'
+                        # RevIN/Decomposition flags（若无则按 False 处理）
+                        try:
+                            revin_en = bool(getattr(getattr(getattr(self.cfg.model, 'normalization', None), 'revin', None), 'enabled', False))
+                        except Exception:
+                            revin_en = False
+                        try:
+                            decomp_en = bool(getattr(getattr(self.cfg.model, 'decomposition', None), 'enabled', False))
+                        except Exception:
+                            decomp_en = False
+                        data_tag = (
+                            f"{ds_name}-L{seq_len if seq_len is not None else 'NA'}-H{hor if hor is not None else 'NA'}-"
+                            f"{norm_tag}-wav{'on' if wav_on else 'off'}{(':'+wav_base) if wav_on else ''}"
+                            f"-rev{'on' if revin_en else 'off'}-dec{'on' if decomp_en else 'off'}"
+                        )
                     except Exception:
                         data_tag = 'exp'
-                    data_tag = data_tag.replace(' ', '_').replace('/', '_').replace('\\', '_')
+                    # 文件名安全：去除空格、斜杠、反斜杠与冒号（如 wavon:haar）等可能引发问题的字符
+                    data_tag = data_tag.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '-')
 
-                    base_name = f"{run_tag}__{data_tag}__{slug}_{sh}"
+                    # 让导出文件名对 YAML 级别唯一：将 YAML stem 合入命名；并在碰撞时追加短序号
+                    yaml_stem = ''
+                    try:
+                        yaml_stem = str(getattr(self.cfg, 'yaml_stem', '') or '').strip()
+                    except Exception:
+                        yaml_stem = ''
+                    # 文件名安全：stem 也做净化，避免含有冒号/斜杠等
+                    safe_stem = (yaml_stem.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '-')) if yaml_stem else ''
+                    prefix = f"{safe_stem}__" if safe_stem else ''
+                    base_name = f"{prefix}{run_tag}__{data_tag}__{slug}_{sh}"
+                    # 限制单个文件名长度（常见文件系统限制为 255 字节）；超长时采用紧凑命名
                     export_name = f"{base_name}.pt"
+                    if len(export_name) > 200:
+                        trimmed_stem = (safe_stem[:80] if safe_stem else '')
+                        base_name = f"{trimmed_stem+'__' if trimmed_stem else ''}{sh}"
+                        export_name = f"{base_name}.pt"
+                    # 确保导出目录存在
+                    os.makedirs(export_dir, exist_ok=True)
                     export_path = os.path.join(export_dir, export_name)
-                    # 若重名则追加递增后缀，避免覆盖
-                    if os.path.exists(export_path):
-                        idx = 2
-                        while True:
-                            cand = os.path.join(export_dir, f"{base_name}-{idx}.pt")
-                            if not os.path.exists(cand):
-                                export_path = cand
-                                break
-                            idx += 1
-                    torch.save(ckpt, export_path)
+                    # 保持“单 YAML 单文件”策略：清理同前缀的历史 best，再覆盖写入
+                    try:
+                        for fn in os.listdir(export_dir):
+                            if fn.startswith(base_name) and fn.endswith('.pt'):
+                                try:
+                                    os.remove(os.path.join(export_dir, fn))
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    # 保存（尽量原子；若替换失败回退直接写）
+                    try:
+                        tmp_path = export_path + ".tmp"
+                        torch.save(ckpt, tmp_path)
+                        os.replace(tmp_path, export_path)  # 原子替换，避免部分写入
+                    except Exception:
+                        torch.save(ckpt, export_path)
                     try:
                         print(f"[checkpoint] Exported BEST to {export_path}")
                     except Exception:

@@ -361,29 +361,14 @@ class _ECA1D(nn.Module):
     def __init__(self, channels: int, k_size: int = 3):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool1d(1)
+        # ECA 1D 权重在通道维上做 1D 卷积，输入形状 (B,C,1)，我们转置到 (B,1,C) 后在最后一维做卷积
         self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1)//2, bias=False)
         self.sigmoid = nn.Sigmoid()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B,C,T)
         y = self.pool(x)               # (B,C,1)
         y = y.transpose(1,2)           # (B,1,C)
         y = self.conv(y)               # (B,1,C)
         y = self.sigmoid(y).transpose(1,2)  # (B,C,1)
         return x * y
 
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor (batch, seq_len, features)
-        Returns:
-            Tensor (batch, seq_len, out_channels)
-        """
-        if x.dim() != 3:
-            raise ValueError(f"Expected 3D input (B, T, F), got shape {tuple(x.shape)}")
-
-        # Convert to (B, C, T) for conv1d
-        x = x.transpose(1, 2)
-        y = self.net(x)
-        # Convert back to (B, T, C)
-        y = y.transpose(1, 2)
-        return y

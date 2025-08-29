@@ -264,6 +264,15 @@ if __name__ == "__main__":
 
     # 应用 CLI 覆盖
     cfg = load_config(args.config)
+    # 记录 YAML stem，便于下游导出命名唯一化
+    try:
+        if args.config:
+            import os
+            from pathlib import Path
+            setattr(cfg, 'yaml_stem', Path(args.config).stem)
+            setattr(cfg, 'yaml_path', os.path.abspath(args.config))
+    except Exception:
+        pass
     if args.output_dir:
         cfg.output_dir = args.output_dir
     if args.image_dir:

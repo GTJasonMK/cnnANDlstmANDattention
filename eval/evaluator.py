@@ -13,7 +13,12 @@ def regression_metrics(preds: torch.Tensor, targets: torch.Tensor) -> Dict[str, 
         mae = torch.mean(torch.abs(preds - targets)).item()
         rmse = mse ** 0.5
         mape = torch.mean(torch.abs((targets - preds) / (targets + 1e-8))).item()
-        return {"mse": mse, "mae": mae, "rmse": rmse, "mape": mape}
+        # R^2 (coefficient of determination)
+        t = targets.detach()
+        ss_res = torch.sum((t - preds) ** 2).item()
+        ss_tot = (torch.sum((t - torch.mean(t)) ** 2).item()) + 1e-8
+        r2 = float(1.0 - ss_res / ss_tot)
+        return {"mse": mse, "mae": mae, "rmse": rmse, "mape": mape, "r2": r2}
 
 
 def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
