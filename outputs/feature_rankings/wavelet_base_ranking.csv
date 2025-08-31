@@ -1,0 +1,4 @@
+feature_name,feature_value,rank,compared_model_indices,compared_model_mse
+wavelet_base,coif5,1,11,0.1689244359731674
+wavelet_base,haar,2,12,0.1694748848676681
+wavelet_base,db4,3,31,0.1856950968503952

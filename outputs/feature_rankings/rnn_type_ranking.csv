@@ -1,0 +1,4 @@
+feature_name,feature_value,rank,compared_model_indices,compared_model_mse
+rnn_type,lstm,1,9,0.1686908453702926
+rnn_type,gru,2,14,0.1698487997055053
+rnn_type,ssm,3,17,0.1702288687229156

@@ -1,0 +1,12 @@
+#会生成68个yaml在./yamls里，每个yaml使用./dataset/electricity_removed.csv作为数据集
+python scripts/generate_control_yamls.py --out-dir ./yamls --data-path ./dataset/electricity_removed.csv --export-best-root ./getmodel/bestmodel --epochs 12 --baseline-cnn standard --baseline-attn standard --baseline-rnn lstm --include-positional --include-wavelet --wavelet-bases db4,haar,coif5 --wavelet-levels 2,3,4 --wavelet-modes symmetric,periodization --wavelet-takes all,approx --ca-per-cnn
+
+#进行训练，会在./getmodel/yaml_elec记录训练过程，训练完的最优模型会保存在./getmodel/bestmodel目录下
+python scripts/multi_console_train.py --yaml-dir ./yamls --output-root ./getmodel/yaml_elec --data-path ./dataset/electricity_removed.csv --gpus 0 --mode background --batch-size 8 --gpu-max-proc 8 --retry 1 --wait-between 2 --wait-exit-seconds 1 --report ./getmodel/train_coverage_report.txt --debug
+
+#批量评估./getmodel/bestmodel目录下的模型，评估结果在./getmodel/batch_eval目录下
+BATCH_EVAL_GROUP=16 python ./batch_eval.py --checkpoints_dir ./getmodel/bestmodel --data /root/dataset/electricity_removed.csv --output_dir ./getmodel/batch_eval --device cuda --gpus 0 --sequence_length 64 --horizon 3 --normalize standard --num-workers 4 --max-per-gpu 4 --batch_size 128 --oom_backoff 2.0 --min_batch_size 16 --save_summary_plot
+
+#架构排行及可视化
+python tools/feature_ranking.py -i batch_metrics.csv -o outputs/feature_rankings --plot_dir outputs/feature_rankings/plots
+

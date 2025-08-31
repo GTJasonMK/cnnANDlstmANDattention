@@ -1,0 +1,6 @@
+feature_name,feature_value,rank,compared_model_indices,compared_model_mse
+cnn_variant,depthwise,1,3,0.1668073683977127
+cnn_variant,inception,2,7,0.1683645248413086
+cnn_variant,standard,3,9,0.1686908453702926
+cnn_variant,dilated,4,22,0.172940656542778
+cnn_variant,tcn,5,30,0.1828054636716842

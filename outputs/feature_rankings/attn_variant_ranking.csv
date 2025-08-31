@@ -1,0 +1,6 @@
+feature_name,feature_value,rank,compared_model_indices,compared_model_mse
+attn_variant,local,1,1,0.1650470197200775
+attn_variant,multiscale,2,8,0.1686237454414367
+attn_variant,standard,3,9,0.1686908453702926
+attn_variant,conformer,4,21,0.1718968898057937
+attn_variant,spatiotemporal,5,29,0.1824178248643875

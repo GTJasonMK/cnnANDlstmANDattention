@@ -1,0 +1,4 @@
+feature_name,feature_value,rank,compared_model_indices,compared_model_mse
+wavelet_level,2,1,12,0.1694748848676681
+wavelet_level,3,2,37,0.2480597198009491
+wavelet_level,4,3,43,0.3423236012458801
