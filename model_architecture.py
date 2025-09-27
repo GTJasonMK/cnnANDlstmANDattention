@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ class CNNLSTMAttentionModel(nn.Module):
     def __init__(
         self,
         num_features: int,
-        cnn_layers: List[dict],
+        cnn_layers,  # List of CNN layer configs
         use_batchnorm: bool,
         cnn_dropout: float,
         lstm_hidden: int,
@@ -61,7 +61,7 @@ class CNNLSTMAttentionModel(nn.Module):
         lstm_dropout: Optional[float] = None,
         cnn_variant: str = "standard",  # "standard"|"depthwise"|"dilated"|"tcn"
         attn_variant: str = "standard",  # "standard"|"multiscale"
-        multiscale_scales: Optional[List[int]] = None,
+        multiscale_scales=None,  # Optional list of scales for multiscale attention
         multiscale_fuse: str = "sum",
         # 新增：注意力位置编码模式、本地注意力参数、CNN通道注意力
         attn_positional_mode: str = "none",
@@ -72,6 +72,8 @@ class CNNLSTMAttentionModel(nn.Module):
         st_fuse: str = "sum",
         cnn_use_channel_attention: bool = False,
         cnn_channel_attention_type: str = "eca",
+        # 🔥 CRITICAL FIX: 添加RNN类型参数
+        rnn_type: str = "lstm",  # "lstm"|"gru"|"ssm"
         # 第二阶段：可选归一化与分解配置（字典，向后兼容）
         normalization: Optional[dict] = None,
         decomposition: Optional[dict] = None,
@@ -111,8 +113,9 @@ class CNNLSTMAttentionModel(nn.Module):
             raise ValueError(f"Unsupported cnn/tcn variant: {cnn_variant}")
 
         # Recurrent backbone: LSTM (default) or GRU/SSM via config
-        rnn_type = getattr(self, 'rnn_type', 'lstm')
+        # 🔥 CRITICAL FIX: 使用构造函数参数而不是从self读取
         rnn_type = (rnn_type or 'lstm').lower()
+        self.rnn_type = rnn_type  # 保存用于后续引用
         if rnn_type == 'gru':
             rnn_cls = GRUProcessor
         elif rnn_type in ('ssm','mamba','ssm-mamba'):
@@ -201,7 +204,8 @@ class CNNLSTMAttentionModel(nn.Module):
         self.attn_variant = attn_variant
         self.multiscale_scales = multiscale_scales or [1, 2]
         self.multiscale_fuse = multiscale_fuse
-        self.rnn_type = 'lstm'  # default; Can be switched via config and main
+        # 🔥 FIXED: 保持实际的RNN类型，不要硬编码覆盖
+        # self.rnn_type = rnn_type  # 已在第118行正确设置
 
     def forward(self, x: torch.Tensor, return_attn: bool = False):
         if x.dim() != 3:

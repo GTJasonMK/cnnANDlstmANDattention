@@ -1,22 +1,58 @@
-# Core scientific stack
-numpy>=1.23
-pandas>=1.5
+# Deep Learning Framework
+torch>=2.0.0
+torchvision>=0.15.0
 
-# Plotting / visualization
-matplotlib>=3.5
-seaborn>=0.12
-plotly>=5.15
+# Core Scientific Stack
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
 
-# Deep learning (choose proper wheel per your CUDA/CPU env)
-# For CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
-# For CUDA: see https://pytorch.org/get-started/locally/
-torch>=2.1
-# TensorBoard logging
-tensorboard>=2.11
+# Visualization & Plotting (Enhanced for Academic Publications)
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.0.0
 
-# Signal processing (wavelet)
-PyWavelets>=1.4
+# Configuration & Utilities
+pyyaml>=6.0
+tqdm>=4.62.0
 
-# Utilities
-PyYAML>=6.0
-tqdm>=4.65
+# Training Monitoring & Evaluation
+tensorboard>=2.8.0
+
+# Statistical Analysis for Enhanced Batch Evaluation
+statsmodels>=0.13.0  # Advanced statistical analysis and significance testing
+
+# Time Series Analysis (for decomposition and forecasting)
+pywavelets>=1.3.0    # Wavelet processing for data augmentation
+
+# Performance Acceleration
+numba>=0.56.0
+
+# Built-in Python Modules (No Installation Required)
+# argparse           # Command-line interface
+# pathlib            # Path handling
+# concurrent.futures # Multi-processing support
+# warnings           # Warning management
+# typing             # Type hints
+# itertools         # Iterator tools
+# functools         # Functional programming utilities
+
+# Professional Well Log Visualization Features
+# All requirements met by existing packages:
+# - matplotlib: 300 DPI output, professional plotting
+# - seaborn: Statistical visualization enhancements
+# - numpy: Numerical computations and array operations
+# - scipy: Statistical significance testing (t-tests)
+# - pandas: Data manipulation and CSV handling
+
+# Development and Debugging Tools (Optional - Uncomment if needed)
+# jupyter>=1.0.0        # For notebook development
+# ipykernel>=6.0.0      # Jupyter kernel support
+# ipywidgets>=7.0.0     # Interactive widgets
+
+# Installation Instructions:
+# pip install -r requirements.txt
+# 
+# For academic visualization features, ensure matplotlib >= 3.5.0
+# For statistical analysis, ensure scipy >= 1.7.0 and statsmodels >= 0.13.0

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -110,7 +110,7 @@ class TCNFeatureExtractor(nn.Module):
       - __init__(in_channels, layer_configs, use_batchnorm=True, dropout=0.0)
       - forward(x) 接收 (B, T, F) 返回 (B, T, C)
 
-    layer_configs: List[dict] 每层支持字段：
+    layer_configs: [dict] 每层支持字段：
       - out_channels: int（必须）
       - kernel_size: int（默认 3）
       - dilation: int（若未提供，按指数 1,2,4,... 推断）
@@ -120,7 +120,7 @@ class TCNFeatureExtractor(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        layer_configs: List[dict],
+        layer_configs: [dict],
         use_batchnorm: bool = True,
         dropout: float = 0.0,
     ) -> None:
@@ -129,7 +129,7 @@ class TCNFeatureExtractor(nn.Module):
         self.use_batchnorm = use_batchnorm
         self.dropout_p = float(dropout)
 
-        layers: List[nn.Module] = []
+        layers: [nn.Module] = []
         current_c = in_channels
         # 若未显式给出 dilation，则采用 1,2,4,...
         default_dil = 1
@@ -197,4 +197,3 @@ class TCNFeatureExtractor(nn.Module):
         # 回到 (B, T, C)
         y = y.transpose(1, 2)
         return y
-

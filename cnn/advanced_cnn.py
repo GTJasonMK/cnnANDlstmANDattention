@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -65,7 +65,7 @@ class DilatedConvBlock(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3,
-                 dilation_rates: List[int] = [1, 2, 4], use_residual: bool = True,
+                 dilation_rates: [int] = [1, 2, 4], use_residual: bool = True,
                  activation: str = "relu", dropout: float = 0.1):
         super().__init__()
 
@@ -149,7 +149,7 @@ class AdvancedCNNFeatureExtractor(nn.Module):
 
     """
 
-    def __init__(self, in_channels: int, layer_configs: List[dict],
+    def __init__(self, in_channels: int, layer_configs: [dict],
                  use_batchnorm: bool = True, dropout: float = 0.0,
                  architecture_type: str = "standard",
                  use_channel_attention: bool = False,
@@ -163,7 +163,7 @@ class AdvancedCNNFeatureExtractor(nn.Module):
         self.use_ca = bool(use_channel_attention)
         self.ca_type = str(channel_attention_type).lower()
 
-        layers: List[nn.Module] = []
+        layers: [nn.Module] = []
         current_c = in_channels
 
         for i, cfg in enumerate(layer_configs):
@@ -244,7 +244,7 @@ class AdvancedCNNFeatureExtractor(nn.Module):
         return nn.Sequential(*block)
 
     def _build_dilated_block(self, in_c: int, out_c: int, k: int,
-                            dilation_rates: List[int], activation: str, cfg: dict) -> nn.Module:
+                            dilation_rates: [int], activation: str, cfg: dict) -> nn.Module:
         return DilatedConvBlock(
             in_c, out_c, kernel_size=k, dilation_rates=dilation_rates,
             activation=activation, dropout=self.dropout_p
@@ -283,7 +283,7 @@ class AdvancedCNNFeatureExtractor(nn.Module):
         """
         ks = cfg.get('inception_kernel_sizes', [3, 5, 7])
         ds = cfg.get('inception_dilations', [1, 2])
-        branches: List[nn.Module] = []
+        branches: [nn.Module] = []
         # 每个分支输出通道近似均分
         n_br = max(1, len(ks) * len(ds))
         br_c = max(1, out_c // n_br)
@@ -335,7 +335,7 @@ class AdvancedCNNFeatureExtractor(nn.Module):
         return last_out
 
 class _ParallelConcat1D(nn.Module):
-    def __init__(self, branches: nn.ModuleList):
+    def __init__(self, branches: nn.Module):
         super().__init__()
         self.branches = branches
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -371,4 +371,3 @@ class _ECA1D(nn.Module):
         y = self.conv(y)               # (B,1,C)
         y = self.sigmoid(y).transpose(1,2)  # (B,C,1)
         return x * y
-

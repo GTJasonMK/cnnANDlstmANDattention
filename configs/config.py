@@ -137,7 +137,7 @@ class SchedulerConfig:
 @dataclass
 class EarlyStoppingConfig:
     enabled: bool = True
-    patience: int = 10
+    patience: int = 20
     min_delta: float = 0.0
 
 
@@ -164,11 +164,14 @@ class DataConfig:
     data_path: Optional[str] = None  # path to CSV or NPZ
     sequence_length: int = 64
     horizon: int = 1
-    feature_indices: Optional[List[int]] = None  # select subset of features
-    target_indices: Optional[List[int]] = None  # default last one
+    feature_indices: Optional[List[int]] = None  # select subset of features for input
+    target_indices: Optional[List[int]] = None  # select target columns for prediction
+    feature_names: Optional[List[str]] = None  # optional feature names for better readability
+    target_names: Optional[List[str]] = None   # optional target names for better readability
+    auto_detect_features: bool = True  # auto detect features from data if indices not provided
     train_split: float = 0.7
     val_split: float = 0.15
-    normalize: str = "standard"  # "standard", "minmax", or "none"
+    normalize: str = "minmax"  # "minmax", or "none" (removed standard)
     batch_size: int = 64
     num_workers: int = 0
     shuffle_train: bool = True

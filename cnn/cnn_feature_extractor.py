@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -27,7 +27,7 @@ class CNNFeatureExtractor(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        layer_configs: List[dict],
+        layer_configs,  # List of layer config dicts
         use_batchnorm: bool = True,
         dropout: float = 0.0,
     ) -> None:
@@ -36,7 +36,7 @@ class CNNFeatureExtractor(nn.Module):
         self.use_batchnorm = use_batchnorm
         self.dropout_p = float(dropout)
 
-        layers: List[nn.Module] = []
+        layers = []  # List of nn.Module layers
         current_c = in_channels
         for cfg in layer_configs:
             out_c = int(cfg.get("out_channels"))
@@ -50,7 +50,7 @@ class CNNFeatureExtractor(nn.Module):
                 p = int(cfg.get("padding"))
 
             conv = nn.Conv1d(current_c, out_c, kernel_size=k, stride=s, padding=p, dilation=d)
-            block: List[nn.Module] = [conv]
+            block = [conv]  # List of layer modules
             if use_batchnorm:
                 block.append(nn.BatchNorm1d(out_c))
 

@@ -53,7 +53,7 @@ class LSTMProcessor(nn.Module):
         self,
         x: torch.Tensor,
         hx: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x: (B, T, F)
@@ -62,14 +62,16 @@ class LSTMProcessor(nn.Module):
                 c0: (num_layers * num_directions, B, hidden_size)
         Returns:
             outputs: (B, T, H) if return_sequence else (B, H)
-            (hn, cn): final states
+            hn: final hidden state (统一为张量格式以匹配GRU接口)
         """
         if x.dim() != 3:
             raise ValueError(f"Expected 3D input (B, T, F), got {tuple(x.shape)}")
         outputs, (hn, cn) = self.lstm(x, hx) if hx is not None else self.lstm(x)
         if self.return_sequence:
-            return outputs, (hn, cn)
+            # 🔥 CRITICAL FIX: 统一接口 - 只返回hidden state，忽略cell state
+            return outputs, hn
         else:
             last = outputs[:, -1, :]
-            return last, (hn, cn)
+            # 🔥 CRITICAL FIX: 统一接口 - 只返回hidden state，忽略cell state
+            return last, hn
 

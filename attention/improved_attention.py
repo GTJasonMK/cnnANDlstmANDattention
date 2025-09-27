@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -39,7 +39,7 @@ class MultiScaleTemporalAttention(nn.Module):
         d_model: int,
         num_heads: int = 4,
         dropout: float = 0.1,
-        scales: Optional[List[int]] = None,
+        scales: Optional[[int]] = None,
         fuse: str = "sum",
     ) -> None:
         super().__init__()
@@ -103,4 +103,3 @@ class MultiScaleTemporalAttention(nn.Module):
             W = torch.stack(attn_ws, dim=0).mean(dim=0)
             return y, W
         return y, None
-

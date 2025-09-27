@@ -9,14 +9,17 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-import yaml  # type: ignore
+# 导入统一的配置工具
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.config_utils import load_yaml_config, save_yaml_config, patch_yaml_config
 
 
 def patch_yaml_for_output(src_yaml: Path, dst_yaml: Path, output_root: Path, data_path: Optional[str] = None, epochs: Optional[int] = None, preserve_export_best: bool = True) -> str:
     """为 YAML 打补丁，设置输出目录、数据路径等，并返回 export_best_dir 绝对路径（字符串）。
-    注意：默认保留 YAML 中的 export_best_dir（不覆盖），以便将所有最优模型统一导出到你在生成 YAML 时设置的同一目录。
+    使用统一的配置工具处理YAML文件。
     """
-    cfg = yaml.safe_load(src_yaml.read_text(encoding='utf-8'))
+    # 使用统一的YAML加载工具
+    cfg = load_yaml_config(str(src_yaml))
 
     # 设置输出目录为 output_root/yaml_stem
     stem = src_yaml.stem
@@ -28,7 +31,7 @@ def patch_yaml_for_output(src_yaml: Path, dst_yaml: Path, output_root: Path, dat
     cfg['train']['checkpoints']['dir'] = str((output_dir / 'checkpoints_o').as_posix())
     cfg['train']['checkpoints']['save_best_only'] = True
 
-    # export_best_dir：默认不覆盖，保持生成 YAML 时设置的“统一目录”
+    # export_best_dir：默认不覆盖，保持生成 YAML 时设置的"统一目录"
     if not preserve_export_best:
         cfg['train']['checkpoints']['export_best_dir'] = str((output_dir / 'export_best').as_posix())
 
@@ -47,9 +50,8 @@ def patch_yaml_for_output(src_yaml: Path, dst_yaml: Path, output_root: Path, dat
         if cfg['train'].get('scheduler', {}).get('name') == 'cosine':
             cfg['train']['scheduler']['T_max'] = int(epochs)
 
-    # 写入目标文件
-    dst_yaml.parent.mkdir(parents=True, exist_ok=True)
-    dst_yaml.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding='utf-8')
+    # 使用统一的YAML保存工具
+    save_yaml_config(cfg, str(dst_yaml))
 
     # 解析并返回 export_best_dir（若未设置，返回 output_root/export_best/yaml_stem）
     exp_dir = cfg['train']['checkpoints'].get('export_best_dir')
@@ -73,8 +75,10 @@ def _launch_tmux(yaml_path: Path, output_dir: Path, gpu_id: Optional[str], sessi
         session_exists = False
     if not session_exists:
         subprocess.run(['tmux', 'new-session', '-d', '-s', session_name, 'bash', '-lc', 'echo tmux session started; sleep 1'], check=True)
-    # 组装命令
-    cmd_parts = [sys.executable, 'main.py', '--config', str(yaml_path), '--output_dir', str(output_dir)]
+    # 组装命令 - 🔥 修复：根据脚本位置动态确定main.py路径
+    script_dir = Path(__file__).parent
+    main_py_path = script_dir.parent / 'main.py'
+    cmd_parts = [sys.executable, str(main_py_path), '--config', str(yaml_path), '--output_dir', str(output_dir)]
     core = ' '.join([f'"{c}"' if " " in c else c for c in cmd_parts])
     if gpu_id is not None:
         core = f'CUDA_VISIBLE_DEVICES={gpu_id} ' + core
@@ -109,8 +113,10 @@ def launch_console_train(yaml_path: Path, output_dir: Path, gpu_id: Optional[str
       - 'background': 直接后台进程（记录 PID 和日志）
     返回：后台模式下返回 PID；tmux/终端模式返回 None
     """
-    # 构建命令（传递 --output_dir 到 main）
-    cmd_parts = [sys.executable, 'main.py', '--config', str(yaml_path), '--output_dir', str(output_dir)]
+    # 构建命令（传递 --output_dir 到 main）- 🔥 修复：使用正确的main.py路径
+    script_dir = Path(__file__).parent
+    main_py_path = script_dir.parent / 'main.py'
+    cmd_parts = [sys.executable, str(main_py_path), '--config', str(yaml_path), '--output_dir', str(output_dir)]
 
     # 设置环境变量
     env = os.environ.copy()
@@ -182,6 +188,82 @@ def launch_console_train(yaml_path: Path, output_dir: Path, gpu_id: Optional[str
         return None
 
 
+def detect_cloud_environment():
+    """Detect if running in a cloud environment (autodl, colab, etc.)"""
+    import os, platform
+    
+    # Check for common cloud environment indicators
+    cloud_indicators = [
+        os.path.exists('/root/autodl-tmp'),  # AutoDL
+        os.path.exists('/content'),          # Google Colab  
+        'COLAB_GPU' in os.environ,          # Google Colab
+        'KAGGLE_KERNEL_RUN_TYPE' in os.environ,  # Kaggle
+        platform.node().startswith('autodl'),   # AutoDL hostname
+    ]
+    
+    return any(cloud_indicators)
+
+
+def validate_environment(args, is_cloud=False):
+    """Validate environment and suggest optimal settings"""
+    issues = []
+    recommendations = []
+    
+    # Check tmux availability if needed
+    if args.mode == 'tmux':
+        if not shutil.which('tmux'):
+            issues.append("tmux mode selected but tmux is not available")
+            recommendations.append("Install tmux: apt-get install tmux (Ubuntu) or yum install tmux (CentOS)")
+    
+    # Check GPU settings
+    if args.gpus:
+        gpu_list = [g.strip() for g in args.gpus.split(',')]
+        if len(gpu_list) > 1 and args.gpu_max_proc > 1:
+            total_concurrent = len(gpu_list) * args.gpu_max_proc
+            if total_concurrent > 8:
+                recommendations.append(f"High concurrency ({total_concurrent} processes) may cause issues. Consider reducing --gpu-max-proc")
+    
+    # Cloud-specific checks
+    if is_cloud:
+        if args.mode == 'background' and args.gpu_max_proc > 2:
+            recommendations.append("Cloud + background mode: consider --gpu-max-proc 1-2 for stability")
+        if args.retry < 2:
+            recommendations.append("Cloud environment: consider --retry 2-3 for better fault tolerance")
+    
+    return issues, recommendations
+
+
+def print_startup_info(args, yaml_files, is_cloud=False):
+    """Print comprehensive startup information"""
+    print(f"\n{'='*60}")
+    print(f"Multi-Console Training Script - Enhanced Cloud Support")
+    print(f"{'='*60}")
+    print(f"Environment: {'Cloud' if is_cloud else 'Local'}")
+    print(f"Mode: {args.mode}")
+    print(f"YAML files: {len(yaml_files)}")
+    print(f"GPUs: {args.gpus if args.gpus else 'CPU only'}")
+    print(f"Max processes per GPU: {args.gpu_max_proc}")
+    print(f"Retry attempts: {args.retry}")
+    print(f"Batch size: {args.batch_size if args.batch_size else 'No batching'}")
+    print(f"{'='*60}")
+    
+    # Validate and show recommendations
+    issues, recommendations = validate_environment(args, is_cloud)
+    
+    if issues:
+        print(f"\n⚠️  POTENTIAL ISSUES:")
+        for issue in issues:
+            print(f"   - {issue}")
+    
+    if recommendations:
+        print(f"\n💡 RECOMMENDATIONS:")
+        for rec in recommendations:
+            print(f"   - {rec}")
+    
+    if issues or recommendations:
+        print(f"{'='*60}")
+
+
 def main():
     ap = argparse.ArgumentParser(description='Launch training for each YAML in separate consoles')
     ap.add_argument('--yaml-dir', required=True, help='Directory containing YAML config files')
@@ -205,6 +287,44 @@ def main():
 
 
     args = ap.parse_args()
+    
+    # Cloud environment detection and auto mode adjustment
+    is_cloud = detect_cloud_environment()
+    if is_cloud:
+        print(f"[INFO] Cloud environment detected, optimizing for stability")
+        print(f"[INFO] Recommendations for cloud training:")
+        print(f"       - Use tmux mode (--mode tmux) for best stability")
+        print(f"       - Reduce concurrent processes (--gpu-max-proc 1-2)")
+        print(f"       - Increase retry attempts (--retry 2-3)")
+        print(f"       - Use smaller batch sizes if memory is limited")
+        
+        # Force tmux mode in cloud environments for better stability
+        if args.mode == 'auto':
+            args.mode = 'tmux'
+            print(f"[INFO] Auto mode switched to tmux for cloud compatibility")
+        elif args.mode == 'background':
+            print(f"[WARN] Background mode in cloud environment may be unstable")
+            print(f"       Consider switching to tmux mode: --mode tmux")
+            
+        # Reduce subprocess concurrency in cloud environments
+        if args.gpu_max_proc > 2:
+            original_proc = args.gpu_max_proc
+            args.gpu_max_proc = min(2, args.gpu_max_proc)
+            print(f"[INFO] Reduced gpu_max_proc from {original_proc} to {args.gpu_max_proc} for cloud stability")
+        # Increase cooldown times in cloud environments
+        if args.cooldown_on_fail < 20.0:
+            args.cooldown_on_fail = 20.0
+            print(f"[INFO] Increased cooldown_on_fail to 20.0s for cloud stability")
+    else:
+        print(f"[INFO] Local environment detected")
+        if args.mode == 'auto':
+            # Auto-detect tmux availability
+            if shutil.which('tmux'):
+                args.mode = 'tmux'
+                print(f"[INFO] tmux available, using tmux mode")
+            else:
+                args.mode = 'background'
+                print(f"[INFO] tmux not available, using background mode")
 
     yaml_dir = Path(args.yaml_dir)
     output_root = Path(args.output_root)
@@ -223,6 +343,9 @@ def main():
     gpus = [g.strip() for g in args.gpus.split(',') if g.strip() != '']
     if not gpus:
         gpus = [None]  # CPU mode
+
+    # Display comprehensive startup information
+    print_startup_info(args, yaml_files, is_cloud)
 
     print(f"[INFO] Found {len(yaml_files)} YAML files")
     print(f"[INFO] Output root: {output_root}")
@@ -259,10 +382,18 @@ def main():
             made = 0
             for g in gpus:
                 while pending and active_per_gpu[g] < int(args.gpu_max_proc):
-                    yaml_file = pending.popleft()
+                    try:
+                        yaml_file = pending.popleft()
+                    except IndexError:
+                        print(f"[ERROR] Attempted to pop from empty pending queue")
+                        break
+                    except Exception as e:
+                        print(f"[ERROR] Unexpected error popping from pending queue: {e}")
+                        break
                     output_dir = output_root / yaml_file.stem
                     patched_yaml = temp_dir / f"{yaml_file.stem}_patched.yaml"
                     exp_dir = patch_yaml_for_output(yaml_file, patched_yaml, output_root, args.data_path, args.epochs)
+
                     try:
                         proc = launch_console_train(
                             patched_yaml,
@@ -277,30 +408,58 @@ def main():
                         print(f"[ERROR] Launch failed for {yaml_file.stem} on GPU {g}: {e}")
                         proc = None
                     if isinstance(proc, subprocess.Popen):
-                        running.append({'proc': proc, 'stem': yaml_file.stem, 'exp_dir': exp_dir, 'yaml': yaml_file, 'gpu': g, 'retries': int(args.retry)})
-                        active_per_gpu[g] += 1
-                        coverage['launched'].append(yaml_file.stem)
-                        print(f"[INFO] Launch stem={yaml_file.stem} PID={proc.pid} GPU={g}")
-                        made += 1
+                        # Enhanced process validation for cloud environments
+                        try:
+                            # Verify process is actually running and accessible
+                            poll_result = proc.poll()
+                            if poll_result is None:  # Process is still running
+                                running.append({'proc': proc, 'stem': yaml_file.stem, 'exp_dir': exp_dir, 'yaml': yaml_file, 'gpu': g, 'retries': int(args.retry)})
+                                active_per_gpu[g] += 1
+                                coverage['launched'].append(yaml_file.stem)
+                                print(f"[INFO] Launch stem={yaml_file.stem} PID={proc.pid} GPU={g}")
+                                made += 1
+                            else:
+                                # Process already exited, probably failed immediately
+                                print(f"[WARN] Process for {yaml_file.stem} exited immediately (rc={poll_result}), adding back to pending")
+                                pending.append(yaml_file)
+                        except (OSError, ValueError) as e:
+                            print(f"[ERROR] Process validation failed for {yaml_file.stem}: {e}")
+                            # Process may be invalid, don't add to running list
+                            pending.append(yaml_file)  # Retry later
                     else:
                         # failed to launch -> count as failed
                         coverage['failed'].append(yaml_file.stem)
             if made == 0 and not running and pending:
                 # cannot launch any (cap=0?) safeguard
                 time.sleep(max(0.5, args.wait_between))
-            # poll running
-            i = 0
-            while i < len(running):
-                item = running[i]
-                p: subprocess.Popen = item['proc']
-                try:
-                    rc = p.poll()
-                except Exception as e:
-                    print(f"[ERROR] Poll failed for {item['stem']}: {e}")
-                    rc = -999
-                if rc is None:
-                    i += 1
-                    continue
+            # poll running - iterate backwards to safely remove items
+            if not running:
+                # No running processes to check
+                pass
+            else:
+                i = len(running) - 1
+                while i >= 0:
+                    # Double-check bounds
+                    if i >= len(running):
+                        print(f"[WARN] Index {i} >= running list length {len(running)}, adjusting")
+                        i = len(running) - 1
+                        continue
+                    if i < 0:
+                        break
+                    
+                    item = running[i]
+                    p: subprocess.Popen = item['proc']
+                    try:
+                        rc = p.poll()
+                    except (OSError, ValueError) as e:
+                        print(f"[ERROR] Poll failed for {item['stem']} (OSError/ValueError): {e}")
+                        rc = -999  # Mark as failed
+                    except Exception as e:
+                        print(f"[ERROR] Unexpected poll error for {item['stem']}: {e}")
+                        rc = -999
+                    if rc is None:
+                        i -= 1
+                        continue
                 # finished
                 g = item['gpu']; stem=item['stem']; exp_dir=item['exp_dir']
                 # close log
@@ -316,7 +475,7 @@ def main():
                     any_pt = False
                     # 批次结束后，汇总 tmux 批次状态（读取 exit_code.txt）
                     succ=0; fail=0
-                    for i, yaml_file in enumerate(batch):
+                    for j, yaml_file in enumerate(batch):
                         outd = output_root / yaml_file.stem
                         ec_file = outd / 'exit_code.txt'
                         if ec_file.exists():
@@ -354,8 +513,17 @@ def main():
                         pending.append(item['yaml'])
                     else:
                         coverage['failed'].append(stem)
-                # remove from running
-                running.pop(i)
+                # remove from running (safe since we're going backwards)
+                try:
+                    running.pop(i)
+                except IndexError as e:
+                    print(f"[ERROR] IndexError popping from running list at index {i}, list length: {len(running)}. Error: {e}")
+                    # Skip this iteration to prevent infinite loop
+                    break
+                except Exception as e:
+                    print(f"[ERROR] Unexpected error popping from running list: {e}")
+                    break
+                i -= 1
             # small sleep to avoid busy loop
             time.sleep(0.5)
 
@@ -383,6 +551,7 @@ def main():
                         output_dir = output_root / yaml_file.stem
                         patched_yaml = temp_dir / f"{yaml_file.stem}_patched.yaml"
                         exp_dir = patch_yaml_for_output(yaml_file, patched_yaml, output_root, args.data_path, args.epochs)
+
                         win_name = f"b{bi:03d}_" + _make_window_name(i, yaml_file.stem)
                         batch_window_names.append(win_name)
                         _launch_tmux(patched_yaml, output_dir, gpu, args.tmux_session, win_name, keep_open=False)

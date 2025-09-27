@@ -1,0 +1,15 @@
+total_experiments: 11
+baseline_config: configs\ablation_dual\baseline__clean_reference.yaml
+tier_breakdown:
+  tier1_core: 10
+  tier2_optimization: 0
+  tier3_hyperparams: 0
+  statistical: 0
+experiment_factors:
+- attention_variant
+- cnn_variant
+- rnn_type
+generated_tiers:
+- 1
+multiseed_enabled: false
+wavelet_enabled: false
